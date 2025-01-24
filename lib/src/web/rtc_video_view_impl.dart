@@ -23,6 +23,8 @@ class RTCVideoView extends StatefulWidget {
   final FilterQuality filterQuality;
   final WidgetBuilder? placeholderBuilder;
 
+  RTCVideoRenderer get videoRenderer => _renderer;
+
   @override
   RTCVideoViewState createState() => RTCVideoViewState();
 }
