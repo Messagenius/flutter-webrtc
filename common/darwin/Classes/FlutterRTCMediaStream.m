@@ -786,8 +786,42 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   NSArray* outputDevices = [audioDeviceModule outputDevices];
   for (RTCIODevice* device in outputDevices) {
     if ([deviceId isEqualToString:device.deviceId]) {
-      [audioDeviceModule setOutputDevice:device];
-      result(nil);
+      // Fork patch: switching the output device during an active call
+      // requires restarting playout — upstream `setOutputDevice:` alone does
+      // NOT re-route a live call on macOS, so the audio keeps coming from the
+      // previous device. Set the device while playout is stopped, then restart
+      // it so the change takes effect immediately.
+      RTCIODevice* currentDevice = audioDeviceModule.outputDevice;
+      if (currentDevice != nil && [currentDevice.deviceId isEqualToString:device.deviceId]) {
+        // Already the active output: restarting playout would only glitch
+        // the call audio for nothing.
+        result(nil);
+        return;
+      }
+      BOOL wasPlaying = audioDeviceModule.playing;
+      if (wasPlaying) {
+        [audioDeviceModule stopPlayout];
+      }
+      BOOL switched = [audioDeviceModule trySetOutputDevice:device];
+      NSInteger restartError = 0;
+      if (wasPlaying) {
+        restartError = [audioDeviceModule initPlayout];
+        if (restartError == 0) {
+          restartError = [audioDeviceModule startPlayout];
+        }
+      }
+      if (!switched) {
+        result([FlutterError errorWithCode:@"selectAudioOutputFailed"
+                                   message:[NSString stringWithFormat:@"failed to switch output to %@", deviceId]
+                                   details:nil]);
+      } else if (restartError != 0) {
+        result([FlutterError errorWithCode:@"selectAudioOutputFailed"
+                                   message:[NSString stringWithFormat:@"output switched but playout restart failed (%ld)",
+                                                                      (long)restartError]
+                                   details:nil]);
+      } else {
+        result(nil);
+      }
       return;
     }
   }
