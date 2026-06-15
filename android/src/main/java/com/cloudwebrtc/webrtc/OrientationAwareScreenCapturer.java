@@ -18,9 +18,6 @@ import android.hardware.display.DisplayManager;
 import android.util.DisplayMetrics;
 import android.hardware.display.VirtualDisplay;
 import android.media.projection.MediaProjectionManager;
-import android.os.Looper;
-import android.os.Handler;
-import android.os.Build;
 import android.view.Display;
 
 /**
@@ -39,6 +36,7 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     private int oldWidth;
     private int oldHeight;
     private VirtualDisplay virtualDisplay;
+    private Surface virtualDisplaySurface;
     private SurfaceTextureHelper surfaceTextureHelper;
     private CapturerObserver capturerObserver;
     private long numCapturedFrames = 0;
@@ -122,6 +120,8 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             this.height = width;
             this.width = height;
         }
+        this.oldWidth = this.width;
+        this.oldHeight = this.height;
 
         mediaProjection = mediaProjectionManager.getMediaProjection(
                 Activity.RESULT_OK, mediaProjectionPermissionResultData);
@@ -146,6 +146,7 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
                     virtualDisplay.release();
                     virtualDisplay = null;
                 }
+                releaseVirtualDisplaySurface();
                 if (mediaProjection != null) {
                     // Unregister the callback before stopping, otherwise the callback recursively
                     // calls this method.
@@ -175,49 +176,58 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             final int width, final int height, final int ignoredFramerate) {
         checkNotDisposed();
         if (this.oldWidth != width || this.oldHeight != height) {
+            this.width = width;
+            this.height = height;
             this.oldWidth = width;
             this.oldHeight = height;
 
-            if (oldHeight > oldWidth) {
-                ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
-                    @Override
-                    public void run() {
-                        if (virtualDisplay != null && surfaceTextureHelper != null) {
-                            virtualDisplay.setSurface(new Surface(surfaceTextureHelper.getSurfaceTexture()));
-                            surfaceTextureHelper.setTextureSize(oldWidth, oldHeight);
-                            virtualDisplay.resize(oldWidth, oldHeight, VIRTUAL_DISPLAY_DPI);
-                        }
+            ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
+                @Override
+                public void run() {
+                    if (surfaceTextureHelper == null || mediaProjection == null) {
+                        return;
                     }
-                });
-            }
 
-            if (oldWidth > oldHeight) {
-                surfaceTextureHelper.setTextureSize(oldWidth, oldHeight);
-                virtualDisplay.setSurface(new Surface(surfaceTextureHelper.getSurfaceTexture()));
-                final Handler handler = new Handler(Looper.getMainLooper());
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
-                            @Override
-                            public void run() {
-                                if (virtualDisplay != null && surfaceTextureHelper != null) {
-                                    virtualDisplay.resize(oldWidth, oldHeight, VIRTUAL_DISPLAY_DPI);
-                                }
-                            }
-                        });
+                    if (virtualDisplay != null) {
+                        resizeVirtualDisplay();
+                    } else {
+                        createVirtualDisplay();
                     }
-                }, 700);
-            }
+                }
+            });
         }
     }
 
     private void createVirtualDisplay() {
+        updateSurfaceTextureSize();
+        releaseVirtualDisplaySurface();
+        virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
+        virtualDisplay = mediaProjection.createVirtualDisplay("WebRTC_ScreenCapture", width, height,
+                VIRTUAL_DISPLAY_DPI, DISPLAY_FLAGS, virtualDisplaySurface,
+                null /* callback */, null /* callback handler */);
+    }
+
+    private void resizeVirtualDisplay() {
+        updateSurfaceTextureSize();
+        virtualDisplay.resize(width, height, VIRTUAL_DISPLAY_DPI);
+        final Surface oldSurface = virtualDisplaySurface;
+        virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
+        virtualDisplay.setSurface(virtualDisplaySurface);
+        if (oldSurface != null) {
+            oldSurface.release();
+        }
+    }
+
+    private void updateSurfaceTextureSize() {
         surfaceTextureHelper.setTextureSize(width, height);
         surfaceTextureHelper.getSurfaceTexture().setDefaultBufferSize(width, height);
-        virtualDisplay = mediaProjection.createVirtualDisplay("WebRTC_ScreenCapture", width, height,
-                VIRTUAL_DISPLAY_DPI, DISPLAY_FLAGS, new Surface(surfaceTextureHelper.getSurfaceTexture()),
-                null /* callback */, null /* callback handler */);
+    }
+
+    private void releaseVirtualDisplaySurface() {
+        if (virtualDisplaySurface != null) {
+            virtualDisplaySurface.release();
+            virtualDisplaySurface = null;
+        }
     }
 
     @Override
