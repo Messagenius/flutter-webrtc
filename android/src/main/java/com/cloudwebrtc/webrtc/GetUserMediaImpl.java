@@ -390,6 +390,13 @@ public class GetUserMediaImpl {
             deviceId = getSourceIdConstraint(constraints.getMap("audio"));
         }
 
+        // Apply a mic requested via the getUserMedia constraint before creating the
+        // audio source, so it takes effect immediately rather than only on the next
+        // call to selectAudioInput/setPreferredInputDevice.
+        if (deviceId != null && VERSION.SDK_INT >= VERSION_CODES.M) {
+            setPreferredInputDevice(deviceId);
+        }
+
         Log.i(TAG, "getUserMedia(audio): " + audioConstraints);
 
         String trackId = stateProvider.getNextTrackUUID();

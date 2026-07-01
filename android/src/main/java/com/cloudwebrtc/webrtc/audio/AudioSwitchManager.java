@@ -55,6 +55,21 @@ public class AudioSwitchManager {
     private AudioSwitch audioSwitch;
 
     /**
+     * The audio output the app asked for, re-applied whenever the AudioSwitch is
+     * (re)activated or the available devices change, so a selection made before the
+     * call is established still takes effect. Null means automatic selection based
+     * on {@link #preferredDeviceList}. Intentionally survives {@link #stop()}.
+     */
+    @Nullable
+    private Class<? extends AudioDevice> desiredAudioDevice;
+
+    /**
+     * When true, a connected bluetooth or wired headset takes priority over
+     * {@link #desiredAudioDevice} (enableSpeakerButPreferBluetooth semantics).
+     */
+    private boolean desiredPreferHeadset;
+
+    /**
      * When false, FlutterWebRTC will not create AudioSwitch or mutate Android audio mode,
      * focus, or routing. Process-global and intended to be set once from native code (e.g.
      * another plugin) before any audio op; defaults to enabled. See
@@ -160,7 +175,13 @@ public class AudioSwitchManager {
             audioSwitch.setAudioAttributeContentType(audioAttributeContentType);
             audioSwitch.setAudioAttributeUsageType(audioAttributeUsageType);
             audioSwitch.setForceHandleAudioRouting(forceHandleAudioRouting);
-            audioSwitch.start(audioDeviceChangeListener);
+            audioSwitch.start((devices, currentDevice) -> {
+                AudioSwitch as = this.audioSwitch;
+                if (as != null) {
+                    applyDesiredAudioOutput(as);
+                }
+                return audioDeviceChangeListener.invoke(devices, currentDevice);
+            });
         }
 
         return audioSwitch;
@@ -170,20 +191,19 @@ public class AudioSwitchManager {
         if (!audioSessionManagementEnabled) {
             return;
         }
-        handler.removeCallbacksAndMessages(null);
-        handler.postAtFrontOfQueue(() -> {
+        handler.post(() -> {
             AudioSwitch audioSwitch = getOrCreateAudioSwitch();
             if (audioSwitch != null && !isActive) {
                 audioSwitch.activate();
                 isActive = true;
+                applyDesiredAudioOutput(audioSwitch);
             }
         });
     }
 
     public void stop() {
         if (audioSwitch != null) {
-            handler.removeCallbacksAndMessages(null);
-            handler.postAtFrontOfQueue(() -> {
+            handler.post(() -> {
                 if (isActive) {
                     Objects.requireNonNull(audioSwitch).deactivate();
                     isActive = false;
@@ -217,24 +237,47 @@ public class AudioSwitchManager {
             return;
         }
 
+        desiredAudioDevice = audioDeviceClass;
+        desiredPreferHeadset = false;
         handler.post(() -> {
             AudioSwitch audioSwitch = getOrCreateAudioSwitch();
-            if (audioSwitch == null) {
-                return;
+            if (audioSwitch != null) {
+                applyDesiredAudioOutput(audioSwitch);
             }
+        });
+    }
 
-            List<AudioDevice> devices = audioSwitch.getAvailableAudioDevices();
-            AudioDevice audioDevice = null;
+    // Must be called on the handler thread. Selects the desired device if it is
+    // currently available; otherwise leaves routing untouched so the device-change
+    // listener can re-apply the preference once the device appears.
+    private void applyDesiredAudioOutput(@NonNull AudioSwitch audioSwitch) {
+        Class<? extends AudioDevice> desired = desiredAudioDevice;
+        if (desired == null) {
+            return;
+        }
+
+        List<AudioDevice> devices = audioSwitch.getAvailableAudioDevices();
+        AudioDevice target = null;
+        if (desiredPreferHeadset) {
             for (AudioDevice device : devices) {
-                if (device.getClass().equals(audioDeviceClass)) {
-                    audioDevice = device;
+                if (device instanceof AudioDevice.BluetoothHeadset
+                        || device instanceof AudioDevice.WiredHeadset) {
+                    target = device;
                     break;
                 }
             }
-            if (audioDevice != null) {
-                audioSwitch.selectDevice(audioDevice);
+        }
+        if (target == null) {
+            for (AudioDevice device : devices) {
+                if (device.getClass().equals(desired)) {
+                    target = device;
+                    break;
+                }
             }
-        });
+        }
+        if (target != null && !target.equals(audioSwitch.getSelectedAudioDevice())) {
+            audioSwitch.selectDevice(target);
+        }
     }
 
     private void updatePreferredDeviceList(boolean speakerOn) {
@@ -269,30 +312,16 @@ public class AudioSwitchManager {
         if (enable) {
             selectAudioOutput(AudioDevice.Speakerphone.class);
         } else {
-            List<AudioDevice> devices = availableAudioDevices();
-            AudioDevice audioDevice = null;
-            for (AudioDevice device : devices) {
-                if (device.getClass().equals(AudioDevice.BluetoothHeadset.class)) {
-                    audioDevice = device;
-                    break;
-                } else if (device.getClass().equals(AudioDevice.WiredHeadset.class)) {
-                    audioDevice = device;
-                    break;
-                } else if (device.getClass().equals(AudioDevice.Earpiece.class)) {
-                    audioDevice = device;
-                    break;
+            // Fall back to automatic selection: with the earpiece-first preferred
+            // list this yields bluetooth > wired headset > earpiece.
+            desiredAudioDevice = null;
+            desiredPreferHeadset = false;
+            handler.post(() -> {
+                AudioSwitch audioSwitch = getOrCreateAudioSwitch();
+                if (audioSwitch != null) {
+                    audioSwitch.selectDevice(null);
                 }
-            }
-            if (audioDevice != null) {
-                selectAudioOutput(audioDevice.getClass());
-            } else {
-                handler.post(() -> {
-                    AudioSwitch audioSwitch = getOrCreateAudioSwitch();
-                    if (audioSwitch != null) {
-                        audioSwitch.selectDevice(null);
-                    }
-                });
-            }
+            });
         }
     }
 
@@ -301,23 +330,14 @@ public class AudioSwitchManager {
             return;
         }
 
-        List<AudioDevice> devices = availableAudioDevices();
-        AudioDevice audioDevice = null;
-        for (AudioDevice device : devices) {
-            if (device.getClass().equals(AudioDevice.BluetoothHeadset.class)) {
-                audioDevice = device;
-                break;
-            } else if (device.getClass().equals(AudioDevice.WiredHeadset.class)) {
-                audioDevice = device;
-                break;
+        desiredAudioDevice = AudioDevice.Speakerphone.class;
+        desiredPreferHeadset = true;
+        handler.post(() -> {
+            AudioSwitch audioSwitch = getOrCreateAudioSwitch();
+            if (audioSwitch != null) {
+                applyDesiredAudioOutput(audioSwitch);
             }
-        }
-
-        if (audioDevice == null) {
-            selectAudioOutput(AudioDevice.Speakerphone.class);
-        } else {
-            selectAudioOutput(audioDevice.getClass());
-        }
+        });
     }
 
     public void selectAudioOutput(@Nullable AudioDeviceKind kind) {

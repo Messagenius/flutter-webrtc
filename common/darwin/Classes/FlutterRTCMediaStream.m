@@ -150,11 +150,13 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
       rtcConstraints = [self parseMediaConstraints:[self defaultAudioConstraints]];
   }
 
-#if !defined(TARGET_OS_IPHONE)
-  if (audioDeviceId != nil) {
+  // `selectAudioInput:` is itself platform-guarded (TARGET_OS_OSX/TARGET_OS_IPHONE
+  // branches); previously this was gated on `!defined(TARGET_OS_IPHONE)`, which
+  // TargetConditionals.h always defines (as 0 on macOS), making the constraint
+  // deviceId a no-op on every Apple platform.
+  if (audioDeviceId.length > 0) {
     [self selectAudioInput:audioDeviceId result:nil];
   }
-#endif
 
   NSString* trackId = [[NSUUID UUID] UUIDString];
   RTCAudioSource *audioSource = [self.peerConnectionFactory audioSourceWithConstraints:rtcConstraints];
@@ -767,23 +769,22 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     return;
   }
 
-  RTCAudioSession* session = [RTCAudioSession sharedInstance];
-  for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
-    if ([port.UID isEqualToString:deviceId]) {
-      if (self.preferredInput != port.portType) {
-        self.preferredInput = port.portType;
-        [AudioUtils selectAudioInput:self.preferredInput];
-      }
-      break;
-    }
-  }
+  // Persist by UID (not just portType) so it survives until the audio engine
+  // (re)enables — see audioDeviceModule:willEnableEngine: — and so two
+  // devices that share a portType (e.g. two bluetooth headsets) can be told
+  // apart. Store it even if not currently available: it will be applied once
+  // the device (re)appears.
+  self.preferredInputUID = deviceId;
+  [AudioUtils selectAudioInputWithUID:deviceId];
   if (result)
     result(nil);
-#endif
+  return;
+#else
   if (result)
     result([FlutterError errorWithCode:@"selectAudioInputFailed"
                                message:[NSString stringWithFormat:@"Error: deviceId not found!"]
                                details:nil]);
+#endif
 }
 
 - (void)selectAudioOutput:(NSString*)deviceId result:(FlutterResult)result {
@@ -838,28 +839,16 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     return;
   }
 
-  RTCAudioSession* session = [RTCAudioSession sharedInstance];
-  NSError* setCategoryError = nil;
-
-  if ([deviceId isEqualToString:@"Speaker"]) {
-    [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_Speaker
-                                       error:&setCategoryError];
-  } else {
-    [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_None
-                                       error:&setCategoryError];
-  }
-
-  if (setCategoryError == nil) {
-    result(nil);
-    return;
-  }
-
-  result([FlutterError
-      errorWithCode:@"selectAudioOutputFailed"
-            message:[NSString
-                        stringWithFormat:@"Error: %@", [setCategoryError localizedFailureReason]]
-            details:nil]);
-
+  // Record the preference and route through AudioUtils so it is persisted in
+  // the WebRTC session configuration and re-applied when the audio unit
+  // starts — a bare overrideOutputAudioPort: is wiped at call establishment.
+  BOOL speaker = [deviceId isEqualToString:@"Speaker"];
+  self.speakerOn = speaker;
+  self.speakerOnButPreferBluetooth = NO;
+  self.speakerPreferenceSet = YES;
+  [AudioUtils setSpeakerphoneOn:speaker];
+  result(nil);
+  return;
 #endif
   result([FlutterError errorWithCode:@"selectAudioOutputFailed"
                              message:[NSString stringWithFormat:@"Error: deviceId not found!"]

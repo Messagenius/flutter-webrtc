@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 
 import '../flutter_webrtc.dart';
+import 'native/preferred_devices.dart';
 import 'native_logs_listener.dart';
 
 class Helper {
@@ -113,12 +114,42 @@ class Helper {
         .selectAudioOutput(AudioOutputOptions(deviceId: deviceId));
   }
 
-  /// Set audio input device for Flutter native
+  /// Set audio input device for Flutter native.
+  ///
+  /// Sticky: can be called before the call is connected (even before the
+  /// first `getUserMedia`). The preference is remembered and re-applied to
+  /// future `getUserMedia` calls that don't explicitly specify a mic. Call
+  /// [clearPreferredAudioInput] to go back to automatic selection.
+  ///
   /// Note: The usual practice in flutter web is to use deviceId as the
   /// `getUserMedia` parameter to get a new audio track and replace it with the
   ///  audio track in the original rtpsender.
-  static Future<void> selectAudioInput(String deviceId) =>
-      NativeAudioManagement.selectAudioInput(deviceId);
+  static Future<void> selectAudioInput(String deviceId) {
+    PreferredDevices.audioInputId = deviceId;
+    return NativeAudioManagement.selectAudioInput(deviceId);
+  }
+
+  /// Clear a previously set [selectAudioInput] preference, reverting to
+  /// automatic microphone selection for future `getUserMedia` calls.
+  static void clearPreferredAudioInput() {
+    PreferredDevices.audioInputId = null;
+  }
+
+  /// Set the preferred camera for future `getUserMedia` calls that don't
+  /// explicitly specify a camera via `deviceId`/`sourceId`/`facingMode`.
+  ///
+  /// Sticky: can be called before the call is connected. Use
+  /// [Helper.cameras] to enumerate available `deviceId`s. Call
+  /// [clearPreferredCamera] to go back to automatic selection.
+  static void setPreferredCamera(String deviceId) {
+    PreferredDevices.videoInputId = deviceId;
+  }
+
+  /// Clear a previously set [setPreferredCamera] preference, reverting to
+  /// automatic camera selection for future `getUserMedia` calls.
+  static void clearPreferredCamera() {
+    PreferredDevices.videoInputId = null;
+  }
 
   /// Enable or disable speakerphone
   /// for iOS/Android only

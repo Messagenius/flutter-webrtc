@@ -6,6 +6,7 @@ import 'package:webrtc_interface/webrtc_interface.dart';
 
 import 'event_channel.dart';
 import 'media_stream_impl.dart';
+import 'preferred_devices.dart';
 import 'utils.dart';
 
 class MediaDeviceNative extends MediaDevices {
@@ -31,9 +32,10 @@ class MediaDeviceNative extends MediaDevices {
   Future<MediaStream> getUserMedia(
       Map<String, dynamic> mediaConstraints) async {
     try {
+      final constraints = _withPreferredDevices(mediaConstraints);
       final response = await WebRTC.invokeMethod(
         'getUserMedia',
-        <String, dynamic>{'constraints': mediaConstraints},
+        <String, dynamic>{'constraints': constraints},
       );
       if (response == null) {
         throw Exception('getUserMedia return null, something wrong');
@@ -107,5 +109,69 @@ class MediaDeviceNative extends MediaDevices {
     });
     // TODO(cloudwebrtc): return the selected device
     return MediaDeviceInfo(label: 'label', deviceId: options!.deviceId);
+  }
+
+  /// Injects [PreferredDevices.audioInputId]/[PreferredDevices.videoInputId]
+  /// as `optional: [{'sourceId': id}]` constraints, but only for tracks the
+  /// caller didn't already pin to a specific device — an explicit constraint
+  /// always wins over the sticky preference.
+  Map<String, dynamic> _withPreferredDevices(
+      Map<String, dynamic> mediaConstraints) {
+    final audioPreference = PreferredDevices.audioInputId;
+    final videoPreference = PreferredDevices.videoInputId;
+    if (audioPreference == null && videoPreference == null) {
+      return mediaConstraints;
+    }
+
+    final constraints = Map<String, dynamic>.from(mediaConstraints);
+    if (audioPreference != null && constraints.containsKey('audio')) {
+      final audio =
+          _injectPreferredSourceId(constraints['audio'], audioPreference);
+      if (audio != null) constraints['audio'] = audio;
+    }
+    if (videoPreference != null && constraints.containsKey('video')) {
+      final video =
+          _injectPreferredSourceId(constraints['video'], videoPreference);
+      if (video != null) constraints['video'] = video;
+    }
+    return constraints;
+  }
+
+  /// Returns a new constraint value with `sourceId` injected, or `null` if
+  /// the track is disabled (`false`) or already pinned to a device
+  /// (`deviceId`, `facingMode`, or an existing `sourceId`).
+  dynamic _injectPreferredSourceId(dynamic trackConstraints, String deviceId) {
+    if (trackConstraints == false) return null;
+
+    if (trackConstraints == null || trackConstraints == true) {
+      return {
+        'optional': [
+          {'sourceId': deviceId}
+        ]
+      };
+    }
+
+    if (trackConstraints is Map) {
+      final map = Map<String, dynamic>.from(trackConstraints);
+      if (map.containsKey('deviceId') || map.containsKey('facingMode')) {
+        return null;
+      }
+      final mandatory = map['mandatory'];
+      if (mandatory is Map && mandatory.containsKey('sourceId')) {
+        return null;
+      }
+      final optional = map['optional'];
+      if (optional is List &&
+          optional.any((o) => o is Map && o.containsKey('sourceId'))) {
+        return null;
+      }
+      map['optional'] = [
+        if (optional is List) ...optional,
+        {'sourceId': deviceId},
+      ];
+      return map;
+    }
+
+    return null;
   }
 }

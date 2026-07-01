@@ -23,6 +23,10 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
                                            RTCPeerConnectionDelegate,
                                            RTCAudioDeviceModuleDelegate,
                                            FlutterStreamHandler
+#if TARGET_OS_IPHONE
+                                           ,
+                                           RTCAudioSessionDelegate
+#endif
 #if TARGET_OS_OSX
                                            ,
                                            RTCDesktopMediaListDelegate,
@@ -59,11 +63,30 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 @property(nonatomic, strong) RTCCameraVideoCapturer* _Nullable videoCapturer;
 @property(nonatomic, strong) FlutterRTCFrameCapturer* _Nullable frameCapturer;
 @property(nonatomic, strong) AVAudioSessionPort _Nullable preferredInput;
+/// UID (AVAudioSessionPortDescription.UID) of the microphone requested via
+/// selectAudioInput, re-applied whenever the audio engine (re)enables so a
+/// selection made before the call is established still takes effect. Nil
+/// means automatic selection.
+@property(nonatomic, strong) NSString* _Nullable preferredInputUID;
 
 @property(nonatomic, strong) NSString* _Nonnull focusMode;
 @property(nonatomic, strong) NSString* _Nonnull exposureMode;
 
 @property(nonatomic, readonly) BOOL audioSessionManagementEnabled;
+
+/// Last speaker preference requested via enableSpeakerphone /
+/// enableSpeakerphoneButPreferBluetooth / selectAudioOutput. Re-applied from
+/// the RTCAudioDeviceModuleDelegate engine-lifecycle callbacks (see
+/// audioDeviceModule:willEnableEngine:... / willStartEngine:...) so a
+/// preference set before the call is established still takes effect once
+/// the AVAudioEngine-based audio device module enables Voice Processing I/O,
+/// which otherwise resets routing to the earpiece regardless of any session
+/// configuration made beforehand.
+@property(nonatomic) BOOL speakerOn;
+@property(nonatomic) BOOL speakerOnButPreferBluetooth;
+/// YES once the app has explicitly expressed a speaker preference; nothing is
+/// re-applied while NO so apps that never call these methods keep defaults.
+@property(nonatomic) BOOL speakerPreferenceSet;
 
 /// Globally enable/disable Flutter WebRTC's own platform audio-session
 /// management (category/mode/focus/routing). Intended to be set once from

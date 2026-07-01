@@ -117,6 +117,7 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   id _textures;
   BOOL _speakerOn;
   BOOL _speakerOnButPreferBluetooth;
+  BOOL _speakerPreferenceSet;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
@@ -163,6 +164,9 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 @synthesize eventSink = _eventSink;
 @synthesize preferredInput = _preferredInput;
 @synthesize audioManager = _audioManager;
+@synthesize speakerOn = _speakerOn;
+@synthesize speakerOnButPreferBluetooth = _speakerOnButPreferBluetooth;
+@synthesize speakerPreferenceSet = _speakerPreferenceSet;
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
   FlutterMethodChannel* channel =
@@ -204,6 +208,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     _messenger = messenger;
     _speakerOn = NO;
     _speakerOnButPreferBluetooth = NO;
+    _speakerPreferenceSet = NO;
     _eventChannel = eventChannel;
     _audioManager = AudioManager.sharedInstance;
 
@@ -240,10 +245,11 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                            selector:@selector(didSessionRouteChange:)
                                                name:AVAudioSessionRouteChangeNotification
                                              object:session];
+  // Re-apply the app's speaker preference when WebRTC's audio unit starts,
+  // since starting it re-applies the WebRTC session configuration and resets
+  // the output route (see audioSessionDidStartPlayOrRecord:).
+  [[RTCAudioSession sharedInstance] addDelegate:self];
 #endif
-
-  // Observe audio device module events.
-  _peerConnectionFactory.audioDeviceModule.observer = self;
 
   return self;
 }
@@ -286,6 +292,132 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
   }
 #endif
+}
+
+#if TARGET_OS_IPHONE
+// Fallback re-apply used outside the engine-lifecycle callbacks below (e.g.
+// from ensureAudioSession, for the didAddStream/track path when the engine is
+// already running and won't re-enable). The primary, reliable path is
+// audioDeviceModule:willEnableEngine:.../willStartEngine:... — those run
+// synchronously before/after Voice Processing I/O is enabled, which is the
+// point that actually resets routing on the AVAudioEngine-based ADM.
+- (void)reapplySpeakerPreference {
+  if (!self.audioSessionManagementEnabled || !_speakerPreferenceSet) {
+    return;
+  }
+  if (_speakerOnButPreferBluetooth) {
+    [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+  } else {
+    [AudioUtils setSpeakerphoneOn:_speakerOn];
+  }
+}
+
+- (void)reapplyPreferredInput {
+  if (!self.audioSessionManagementEnabled || self.preferredInputUID == nil) {
+    return;
+  }
+  [AudioUtils selectAudioInputWithUID:self.preferredInputUID];
+}
+
+#pragma mark - RTCAudioSessionDelegate
+
+- (void)audioSessionDidStartPlayOrRecord:(RTC_OBJC_TYPE(RTCAudioSession) *)session {
+  // Legacy hook: the AVAudioEngine-based audio device module (the only ADM
+  // type this plugin uses on iOS, see -initialize:) never calls this. Kept as
+  // a no-op safety net in case that changes; the real re-apply happens in the
+  // RTCAudioDeviceModuleDelegate callbacks below.
+}
+#endif
+
+#pragma mark - RTCAudioDeviceModuleDelegate
+
+- (void)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+    didReceiveSpeechActivityEvent:(RTC_OBJC_TYPE(RTCSpeechActivityEvent))speechActivityEvent {
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+                didCreateEngine:(AVAudioEngine *)engine {
+  return 0;
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+               willEnableEngine:(AVAudioEngine *)engine
+               isPlayoutEnabled:(BOOL)isPlayoutEnabled
+             isRecordingEnabled:(BOOL)isRecordingEnabled {
+#if TARGET_OS_IPHONE
+  // Configure category/mode/options right before Voice Processing I/O is
+  // enabled — the point that actually determines initial routing on this ADM.
+  // Anything configured earlier (e.g. via ensureAudioSession at getUserMedia
+  // time) is not preserved across this step.
+  if (self.audioSessionManagementEnabled) {
+    [AudioUtils configureAudioSessionForEngineWithRecording:isRecordingEnabled
+                                        speakerPreferenceSet:_speakerPreferenceSet
+                                                    speakerOn:_speakerOn
+                                             preferBluetooth:_speakerOnButPreferBluetooth];
+    [self reapplyPreferredInput];
+  }
+#endif
+  return 0;
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+                willStartEngine:(AVAudioEngine *)engine
+               isPlayoutEnabled:(BOOL)isPlayoutEnabled
+             isRecordingEnabled:(BOOL)isRecordingEnabled {
+#if TARGET_OS_IPHONE
+  // Voice Processing I/O has just been enabled, which resets the output
+  // route regardless of the category/mode/options configured in
+  // willEnableEngine:; re-assert the speaker override here so it sticks.
+  if (self.audioSessionManagementEnabled) {
+    [self reapplySpeakerPreference];
+  }
+#endif
+  return 0;
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+                  didStopEngine:(AVAudioEngine *)engine
+               isPlayoutEnabled:(BOOL)isPlayoutEnabled
+             isRecordingEnabled:(BOOL)isRecordingEnabled {
+  return 0;
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+               didDisableEngine:(AVAudioEngine *)engine
+               isPlayoutEnabled:(BOOL)isPlayoutEnabled
+             isRecordingEnabled:(BOOL)isRecordingEnabled {
+  return 0;
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+              willReleaseEngine:(AVAudioEngine *)engine {
+  return 0;
+}
+
+// No custom audio graph processing: wire the engine's own source straight
+// through to its own destination, exactly as it would without an observer.
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+                         engine:(AVAudioEngine *)engine
+      configureInputFromSource:(AVAudioNode *)source
+                  toDestination:(AVAudioNode *)destination
+                     withFormat:(AVAudioFormat *)format
+                        context:(NSDictionary *)context {
+  if (source != nil) {
+    [engine connect:source to:destination format:format];
+  }
+  return 0;
+}
+
+- (NSInteger)audioDeviceModule:(RTC_OBJC_TYPE(RTCAudioDeviceModule) *)audioDeviceModule
+                         engine:(AVAudioEngine *)engine
+     configureOutputFromSource:(AVAudioNode *)source
+                  toDestination:(AVAudioNode *)destination
+                     withFormat:(AVAudioFormat *)format
+                        context:(NSDictionary *)context {
+  if (destination != nil) {
+    [engine connect:source to:destination format:format];
+  }
+  return 0;
 }
 
 -(void) initLoggerCallback:(RTCLoggingSeverity)severity {
@@ -351,12 +483,14 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
 
-        // Allow an embedding plugin (e.g. livekit_client) to own the audio
-        // device module's engine-lifecycle delegate. Only override the observer
-        // when one is registered, leaving default behavior unchanged otherwise.
-        if (gAudioDeviceModuleObserver != nil) {
-            _peerConnectionFactory.audioDeviceModule.observer = gAudioDeviceModuleObserver;
-        }
+        // Observe the audio device module's engine-lifecycle callbacks so we can
+        // steer routing (speaker/mic) right before the AVAudioEngine-based ADM
+        // enables Voice Processing I/O — see audioDeviceModule:willEnableEngine:
+        // and audioDeviceModule:willStartEngine: below. Allow an embedding
+        // plugin (e.g. livekit_client) to take over this slot instead when it
+        // has registered one; there is only a single observer slot on the ADM.
+        _peerConnectionFactory.audioDeviceModule.observer =
+            (gAudioDeviceModuleObserver != nil) ? gAudioDeviceModuleObserver : self;
 
 #if TARGET_OS_OSX
         // CoreAudio ADM requires explicit device initialization on macOS
@@ -1165,6 +1299,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     NSNumber* enable = argsMap[@"enable"];
     _speakerOn = enable.boolValue;
     _speakerOnButPreferBluetooth = NO;
+    _speakerPreferenceSet = YES;
     if (self.audioSessionManagementEnabled) {
       [AudioUtils setSpeakerphoneOn:_speakerOn];
       postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
@@ -1178,6 +1313,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   else if ([@"enableSpeakerphoneButPreferBluetooth" isEqualToString:call.method]) {
     _speakerOn = YES;
     _speakerOnButPreferBluetooth = YES;
+    _speakerPreferenceSet = YES;
     if (self.audioSessionManagementEnabled) {
       [AudioUtils setSpeakerphoneOnButPreferBluetooth];
     }
@@ -1188,6 +1324,14 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     NSDictionary* configuration = argsMap[@"configuration"];
     if (self.audioSessionManagementEnabled) {
       [AudioUtils setAppleAudioConfiguration:configuration];
+      // The app has taken explicit control of the session; drop any sticky
+      // speaker preference so the engine-lifecycle hooks honor the configured
+      // mode (voiceChat → earpiece, videoChat → speaker) instead of re-applying
+      // a preference left over from an earlier call. A later
+      // enableSpeakerphone/selectAudioOutput re-establishes the preference.
+      _speakerPreferenceSet = NO;
+      _speakerOn = NO;
+      _speakerOnButPreferBluetooth = NO;
     }
     result(nil);
   }
@@ -1784,6 +1928,9 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     return;
   }
   [AudioUtils ensureAudioSessionWithRecording:[self hasLocalAudioTrack]];
+  // Covers the didAddStream/track paths when the audio unit is already
+  // running and audioSessionDidStartPlayOrRecord: won't fire again.
+  [self reapplySpeakerPreference];
 #endif
 }
 
@@ -1793,6 +1940,19 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     return;
   }
   if (![self hasLocalAudioTrack] && self.peerConnections.count == 0) {
+    // The call session is fully over: the speaker preference is per-call
+    // state, so drop it (and any mode/options it leaked into the shared
+    // WebRTC configuration) so the next call starts from a clean default
+    // instead of inheriting the previous call's routing. The mic preference
+    // (preferredInputUID) intentionally survives across calls.
+    _speakerOn = NO;
+    _speakerOnButPreferBluetooth = NO;
+    _speakerPreferenceSet = NO;
+    RTCAudioSessionConfiguration* config = [RTCAudioSessionConfiguration webRTCConfiguration];
+    config.mode = AVAudioSessionModeVoiceChat;
+    config.categoryOptions = AVAudioSessionCategoryOptionAllowBluetooth |
+                             AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+                             AVAudioSessionCategoryOptionAllowAirPlay;
     [AudioUtils deactiveRtcAudioSession];
   }
 #endif
@@ -2670,6 +2830,12 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
 - (void)audioDeviceModuleDidUpdateDevices:(RTCAudioDeviceModule *)audioDeviceModule {
     NSLog(@"audioDeviceModule did update devices");
+#if TARGET_OS_IPHONE
+    // The preferred mic may have just (re)appeared (e.g. a bluetooth headset
+    // reconnecting) — re-apply it now rather than waiting for the next engine
+    // enable, which may not happen again during this call.
+    [self reapplyPreferredInput];
+#endif
     if (self.eventSink) {
       postEvent( self.eventSink, @{@"event" : @"onDeviceChange"});
     }
