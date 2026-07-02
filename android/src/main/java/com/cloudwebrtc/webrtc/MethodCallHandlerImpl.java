@@ -2157,7 +2157,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   }
 
   public void streamDispose(final MediaStream stream) {
-    List<VideoTrack> videoTracks = stream.videoTracks;
+    // Copy the track lists because stream.removeTrack() mutates the underlying
+    // stream.videoTracks / stream.audioTracks, which would otherwise trigger a
+    // ConcurrentModificationException while iterating.
+    List<VideoTrack> videoTracks = new ArrayList<>(stream.videoTracks);
     for (VideoTrack track : videoTracks) {
       try {
         String trackId = track.id();
@@ -2170,7 +2173,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         Log.d(TAG, "streamDispose(): video track already disposed, skipping");
       }
     }
-    List<AudioTrack> audioTracks = stream.audioTracks;
+    List<AudioTrack> audioTracks = new ArrayList<>(stream.audioTracks);
     for (AudioTrack track : audioTracks) {
       try {
         String trackId = track.id();
