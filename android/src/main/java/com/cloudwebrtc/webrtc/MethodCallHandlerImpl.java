@@ -130,6 +130,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   private JavaAudioDeviceModule audioDeviceModule;
 
+  // JavaAudioDeviceModule has no mute getter, so mirror the last value set
+  // via the "setMicrophoneMuted" method call.
+  private boolean microphoneMuted = false;
+
   private FlutterRTCFrameCryptor frameCryptor;
 
   private FlutterDataPacketCryptor dataPacketCryptor;
@@ -141,6 +145,24 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   private CustomVideoDecoderFactory videoDecoderFactory;
 
   public AudioProcessingController audioProcessingController;
+
+  // WARP (WebRTC Abridged Roundtrip Protocol, draft-uberti-tsvwg-warp) is opted
+  // into through the `enableWARP` initialize() option. The part of it that
+  // libwebrtc implements is `WebRTC-IceHandshakeDtls`, the DTLS handshake
+  // piggybacked on the ICE STUN binding exchange. Field trials are process-global
+  // and are read when a peer connection builds its transports, so they are passed
+  // to PeerConnectionFactory.initialize() before any peer connection exists.
+  private static final String FIELD_TRIAL_ICE_HANDSHAKE_DTLS =
+          "WebRTC-IceHandshakeDtls/Enabled/";
+
+  // `WebRTC-ForcePlayoutDelay` renders every frame as soon as it is decoded instead
+  // of holding it back for the jitter buffer target delay. Opted into through the
+  // `zeroPlayoutDelay` initialize() option, and read at the same moment as the
+  // trial above.
+  private static final String FIELD_TRIAL_FORCE_PLAYOUT_DELAY =
+          "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/";
+
+  private static boolean warpEnabled = false;
 
   public static class LogSink implements Loggable {
     @Override
@@ -205,17 +227,32 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
     mPeerConnectionObservers.clear();
   }
-  private void initialize(boolean bypassVoiceProcessing, int networkIgnoreMask, boolean forceSWCodec, List<String> forceSWCodecList,
-  @Nullable ConstraintsMap androidAudioConfiguration, Severity logSeverity, @Nullable Integer audioSampleRate, @Nullable Integer audioOutputSampleRate) {
+  private void initialize(boolean bypassVoiceProcessing, boolean androidUseHardwareAudioProcessing, int networkIgnoreMask, boolean forceSWCodec, List<String> forceSWCodecList,
+  @Nullable ConstraintsMap androidAudioConfiguration, Severity logSeverity, @Nullable Integer audioSampleRate, @Nullable Integer audioOutputSampleRate, boolean enableWARP, boolean zeroPlayoutDelay) {
     if (mFactory != null) {
       return;
     }
 
-    PeerConnectionFactory.initialize(
+    warpEnabled = enableWARP;
+
+    InitializationOptions.Builder initializationOptionsBuilder =
             InitializationOptions.builder(context)
                     .setEnableInternalTracer(true)
-                    .setInjectableLogger(logSink, logSeverity)
-                    .createInitializationOptions());
+                    .setInjectableLogger(logSink, logSeverity);
+
+    String fieldTrials = "";
+    if (enableWARP) {
+      fieldTrials += FIELD_TRIAL_ICE_HANDSHAKE_DTLS;
+    }
+    if (zeroPlayoutDelay) {
+      fieldTrials += FIELD_TRIAL_FORCE_PLAYOUT_DELAY;
+    }
+    if (!fieldTrials.isEmpty()) {
+      initializationOptionsBuilder.setFieldTrials(fieldTrials);
+      Log.d(TAG, "enabled field trials: " + fieldTrials);
+    }
+
+    PeerConnectionFactory.initialize(initializationOptionsBuilder.createInitializationOptions());
 
     getUserMediaImpl = new GetUserMediaImpl(this, context);
 
@@ -256,7 +293,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
                         .setUseStereoOutput(true)
                         .setAudioSource(MediaRecorder.AudioSource.MIC);
     } else {
-      boolean useHardwareAudioProcessing = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
+      boolean useHardwareAudioProcessing = androidUseHardwareAudioProcessing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
       boolean useLowLatency = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O;
       audioDeviceModuleBuilder.setUseHardwareAcousticEchoCanceler(useHardwareAudioProcessing)
                         .setUseLowLatency(useLowLatency)
@@ -428,6 +465,14 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           enableBypassVoiceProcessing = (boolean)options.get("bypassVoiceProcessing");
         }
 
+        // Defaults to true, matching the previous behaviour. Set to false to leave the
+        // platform hardware AEC/NS off so the WebRTC software APM handles echo/noise
+        // instead. Useful on devices whose built-in AEC is unreliable (#1433).
+        boolean androidUseHardwareAudioProcessing = true;
+        if(options.get("androidUseHardwareAudioProcessing") != null) {
+          androidUseHardwareAudioProcessing = (boolean)options.get("androidUseHardwareAudioProcessing");
+        }
+
         Severity logSeverity = Severity.LS_NONE;
         if (constraintsMap.hasKey("logSeverity")
                 && constraintsMap.getType("logSeverity") == ObjectType.String) {
@@ -447,7 +492,24 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           audioOutputSampleRate = constraintsMap.getInt("audioOutputSampleRate");
         }
 
-        initialize(enableBypassVoiceProcessing, networkIgnoreMask, forceSWCodec, forceSWCodecList, androidAudioConfiguration, logSeverity, audioSampleRate, audioOutputSampleRate);
+        // WARP (draft-uberti-tsvwg-warp): shortens the connection setup by running
+        // the DTLS handshake inside the ICE STUN binding exchange. Has to be known
+        // here, the field trial is read before any peer connection is built.
+        boolean enableWARP = false;
+        if (constraintsMap.hasKey("enableWARP")
+                && constraintsMap.getType("enableWARP") == ObjectType.Boolean) {
+          enableWARP = constraintsMap.getBoolean("enableWARP");
+        }
+
+        // Render frames as soon as they are decoded, trading jitter buffer smoothing
+        // for latency. Same timing constraint as WARP: it is a field trial.
+        boolean zeroPlayoutDelay = false;
+        if (constraintsMap.hasKey("zeroPlayoutDelay")
+                && constraintsMap.getType("zeroPlayoutDelay") == ObjectType.Boolean) {
+          zeroPlayoutDelay = constraintsMap.getBoolean("zeroPlayoutDelay");
+        }
+
+        initialize(enableBypassVoiceProcessing, androidUseHardwareAudioProcessing, networkIgnoreMask, forceSWCodec, forceSWCodecList, androidAudioConfiguration, logSeverity, audioSampleRate, audioOutputSampleRate, enableWARP, zeroPlayoutDelay);
         result.success(null);
         break;
       }
@@ -730,7 +792,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           stream = getStreamForId(streamId, ownerTag);
         }
         if (trackId != null && !trackId.equals("0")){
-          render.setStream(stream, trackId, ownerTag);
+          MediaStreamTrack track = getTrackForId(trackId, ownerTag);
+          if (track instanceof VideoTrack) {
+            render.setTrack((VideoTrack) track, streamId, ownerTag);
+          } else {
+            render.setStream(stream, trackId, ownerTag);
+          }
         } else {
           render.setStream(stream, ownerTag);
         }
@@ -1145,6 +1212,25 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         });
         break;
       }
+      case "setMicrophoneMuted": {
+        Boolean muted = call.argument("muted");
+        if (muted == null) {
+          resultError("setMicrophoneMuted", "muted is required", result);
+          break;
+        }
+        if (audioDeviceModule == null) {
+          resultError("setMicrophoneMuted", "audioDeviceModule is null", result);
+          break;
+        }
+        audioDeviceModule.setMicrophoneMute(muted);
+        microphoneMuted = muted;
+        result.success(null);
+        break;
+      }
+      case "isMicrophoneMuted": {
+        result.success(microphoneMuted);
+        break;
+      }
       case "setLogSeverity": {
         //now it's possible to setup logSeverity only via PeerConnectionFactory.initialize method
         //Log.d(TAG, "no implementation for 'setLogSeverity'");
@@ -1262,6 +1348,14 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
     List<IceServer> iceServers = createIceServers(iceServersArray);
     RTCConfiguration conf = new RTCConfiguration(iceServers);
+
+    // WARP also marks the packets with DSCP; the field trial that carries the DTLS
+    // handshake in the STUN exchange was applied at initialize() time. An explicit
+    // `enableDscp` in the configuration below still wins.
+    if (warpEnabled) {
+      conf.enableDscp = true;
+    }
+
     if (map == null) {
       return conf;
     }
@@ -1305,6 +1399,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
             break;
         }
       }
+    }
+
+    if (map.hasKey("enableSctpSnap")
+            && map.getType("enableSctpSnap") == ObjectType.Boolean) {
+      conf.enableSctpSnap = map.getBoolean("enableSctpSnap");
     }
 
     // rtcpMuxPolicy (public api)
@@ -1525,10 +1624,27 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
   }
 
+  @Override
+  public void onRemoteTrackAdded(
+      String peerConnectionId, String streamId, MediaStreamTrack track) {
+    if (!(track instanceof VideoTrack)) {
+      return;
+    }
+    final String trackId = track.id();
+    mainHandler.post(() -> {
+      for (int i = 0; i < renders.size(); i++) {
+        FlutterRTCVideoRenderer renderer = renders.valueAt(i);
+        if (renderer.checkVideoTrack(trackId, peerConnectionId)) {
+          renderer.setTrack((VideoTrack) track, streamId, peerConnectionId);
+        }
+      }
+    });
+  }
+
   public MediaStreamTrack getRemoteTrack(String trackId) {
     for (Entry<String, PeerConnectionObserver> entry : mPeerConnectionObservers.entrySet()) {
       PeerConnectionObserver pco = entry.getValue();
-      MediaStreamTrack track = pco.remoteTracks.get(trackId);
+      MediaStreamTrack track = pco.getRemoteTrack(trackId);
       if (track == null) {
         track = pco.getTransceiversTrack(trackId);
       }
@@ -1629,7 +1745,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           continue;
 
         PeerConnectionObserver pco = entry.getValue();
-        mediaStreamTrack = pco.remoteTracks.get(trackId);
+        mediaStreamTrack = pco.getRemoteTrack(trackId);
 
         if (mediaStreamTrack == null) {
           mediaStreamTrack = pco.getTransceiversTrack(trackId);

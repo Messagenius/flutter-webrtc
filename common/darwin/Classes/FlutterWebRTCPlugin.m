@@ -140,6 +140,43 @@ static BOOL gAudioSessionManagementEnabled = YES;
 // retains it. See +setAudioDeviceModuleObserver:.
 static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
+// WARP (WebRTC Abridged Roundtrip Protocol, draft-uberti-tsvwg-warp) is opted
+// into through the `enableWARP` initialize() option. The part of it that
+// libwebrtc implements is `WebRTC-IceHandshakeDtls`, the DTLS handshake
+// piggybacked on the ICE STUN binding exchange. The trials end up in the
+// environment the peer connection factory is built with, so the base set is kept
+// in one place and re-applied with the extra trial from -initialize:, which runs
+// before the factory and any peer connection exist.
+static BOOL gWarpEnabled = NO;
+
+// `WebRTC-ForcePlayoutDelay` renders every frame as soon as it is decoded instead
+// of holding it back for the jitter buffer target delay. Opted into through the
+// `zeroPlayoutDelay` initialize() option, and read at the same moment as the
+// trials above.
+static NSString* const kFlutterWebRTCFieldTrialForcePlayoutDelay = @"WebRTC-ForcePlayoutDelay";
+static NSString* const kFlutterWebRTCFieldTrialZeroPlayoutDelayValue = @"min_ms:0,max_ms:0";
+
+static BOOL gZeroPlayoutDelayEnabled = NO;
+
+static void FlutterWebRTCApplyFieldTrials(void) {
+  // "Key/Value/" pairs. +configureFieldTrials: replaces the whole string and is
+  // read when the factory creates its environment, so every trial has to be in
+  // here, and this has to run before the factory is created.
+  NSMutableString* fieldTrials = [NSMutableString
+      stringWithFormat:@"%@/%@/", kRTCFieldTrialUseNWPathMonitor, kRTCFieldTrialEnabledValue];
+  if (gWarpEnabled) {
+    [fieldTrials
+        appendFormat:@"%@/%@/", kRTCFieldTrialIceHandshakeDtlsKey, kRTCFieldTrialEnabledValue];
+  }
+  if (gZeroPlayoutDelayEnabled) {
+    [fieldTrials appendFormat:@"%@/%@/", kFlutterWebRTCFieldTrialForcePlayoutDelay,
+                              kFlutterWebRTCFieldTrialZeroPlayoutDelayValue];
+  }
+  // Replaces the deprecated RTCInitFieldTrialDictionary(), which set a
+  // process-global instead (bugs.webrtc.org/42220378).
+  [RTCPeerConnectionFactory configureFieldTrials:fieldTrials];
+}
+
 + (FlutterWebRTCPlugin *)sharedSingleton
 {
   @synchronized(self)
@@ -150,6 +187,30 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
 + (void)setAudioSessionManagementEnabled:(BOOL)enabled {
   gAudioSessionManagementEnabled = enabled;
+}
+
++ (NSString*)stringForMuteMode:(RTCAudioEngineMuteMode)mode {
+  switch (mode) {
+    case RTCAudioEngineMuteModeVoiceProcessing:
+      return @"voiceProcessing";
+    case RTCAudioEngineMuteModeRestartEngine:
+      return @"restartEngine";
+    case RTCAudioEngineMuteModeInputMixer:
+      return @"inputMixer";
+    case RTCAudioEngineMuteModeUnknown:
+      return @"unknown";
+  }
+}
+
++ (RTCAudioEngineMuteMode)muteModeForString:(NSString*)mode {
+  if ([mode isEqualToString:@"voiceProcessing"]) {
+    return RTCAudioEngineMuteModeVoiceProcessing;
+  } else if ([mode isEqualToString:@"restartEngine"]) {
+    return RTCAudioEngineMuteModeRestartEngine;
+  } else if ([mode isEqualToString:@"inputMixer"]) {
+    return RTCAudioEngineMuteModeInputMixer;
+  }
+  return RTCAudioEngineMuteModeUnknown;
 }
 
 + (void)setAudioDeviceModuleObserver:(id<RTCAudioDeviceModuleDelegate>)observer {
@@ -222,11 +283,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 #endif
   }
 
-  NSDictionary* fieldTrials = @{kRTCFieldTrialUseNWPathMonitor : kRTCFieldTrialEnabledValue};
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  RTCInitFieldTrialDictionary(fieldTrials);
-#pragma clang diagnostic pop
+  FlutterWebRTCApplyFieldTrials();
 
   self.peerConnections = [NSMutableDictionary new];
   self.localStreams = [NSMutableDictionary new];
@@ -452,18 +509,28 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
 - (void)initialize:(NSArray*)networkIgnoreMask
     bypassVoiceProcessing:(BOOL)bypassVoiceProcessing
-                 severity:(RTCLoggingSeverity)severity {
+                 severity:(RTCLoggingSeverity)severity
+              enableWARP:(BOOL)enableWARP
+        zeroPlayoutDelay:(BOOL)zeroPlayoutDelay {
     // RTCSetMinDebugLogLevel(severity);
     [self initLoggerCallback:severity];
 
     if (!_peerConnectionFactory) {
+        // Field trials have to be in place before the factory builds its transports,
+        // so a later initialize: call cannot change them any more.
+        if (enableWARP != gWarpEnabled || zeroPlayoutDelay != gZeroPlayoutDelayEnabled) {
+          gWarpEnabled = enableWARP;
+          gZeroPlayoutDelayEnabled = zeroPlayoutDelay;
+          FlutterWebRTCApplyFieldTrials();
+        }
+
         VideoDecoderFactory* decoderFactory = [[VideoDecoderFactory alloc] init];
         VideoEncoderFactory* encoderFactory = [[VideoEncoderFactory alloc] init];
 
         VideoEncoderFactorySimulcast* simulcastFactory =
             [[VideoEncoderFactorySimulcast alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
 
-        // Use the AVAudioEngine audio device module on both iOS and macOS.
+        // Use the AVAudioEngine audio device module on iOS devices and macOS.
         //
         // macOS previously used the CoreAudio ADM (value 0) to avoid an
         // AVAudioIONodeImpl::SetOutputFormat sample-rate assertion when the
@@ -473,9 +540,13 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
         // state-based voice-processing checks, engine recreate ordering).
         // The AudioEngine ADM enables platform voice processing (Apple
         // AEC/NS/AGC) and the audio processing options API on macOS.
-        // iOS also requires the AudioEngine ADM because the CoreAudio ADM
+        // iOS devices also require the AudioEngine ADM because the CoreAudio ADM
         // crashes when NSMicrophoneUsageDescription is absent (#2007, #2009).
         RTCAudioDeviceModuleType audioDeviceModuleType = RTCAudioDeviceModuleTypeAudioEngine;
+#if TARGET_OS_IOS && TARGET_OS_SIMULATOR
+        // The AudioEngine ADM can expose a zero-rate input on the iOS Simulator.
+        audioDeviceModuleType = RTCAudioDeviceModuleTypePlatformDefault;
+#endif
         _peerConnectionFactory =
             [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:audioDeviceModuleType
                                                       bypassVoiceProcessing:bypassVoiceProcessing
@@ -555,8 +626,26 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       severity = [self str2LogSeverity:severityStr];
     }
 
+    // WARP (draft-uberti-tsvwg-warp): shortens the connection setup by running the
+    // DTLS handshake inside the ICE STUN binding exchange. Has to be known here,
+    // the field trial is read before any peer connection is built.
+    BOOL enableWARP = NO;
+    if (options[@"enableWARP"] != nil && [options[@"enableWARP"] isKindOfClass:[NSNumber class]]) {
+      enableWARP = ((NSNumber*)options[@"enableWARP"]).boolValue;
+    }
+
+    // Render frames as soon as they are decoded, trading jitter buffer smoothing
+    // for latency. Same timing constraint as WARP: it is a field trial.
+    BOOL zeroPlayoutDelay = NO;
+    if (options[@"zeroPlayoutDelay"] != nil &&
+        [options[@"zeroPlayoutDelay"] isKindOfClass:[NSNumber class]]) {
+      zeroPlayoutDelay = ((NSNumber*)options[@"zeroPlayoutDelay"]).boolValue;
+    }
+
     [self initialize:networkIgnoreMask bypassVoiceProcessing:enableBypassVoiceProcessing
-                     severity:severity];
+                     severity:severity
+                     enableWARP:enableWARP
+                     zeroPlayoutDelay:zeroPlayoutDelay];
     result(@"");
   } else if ([@"createPeerConnection" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
@@ -1008,24 +1097,39 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
              [@"peerConnectionDispose" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
+    BOOL isDispose = [@"peerConnectionDispose" isEqualToString:call.method];
 
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
     if (peerConnection) {
+      // Closing twice is harmless, the native peer connection ignores the second call.
       [peerConnection close];
-      [self.peerConnections removeObjectForKey:peerConnectionId];
+      peerConnection.closedByPlugin = YES;
 
       // Clean up peerConnection's streams and tracks
       [peerConnection.remoteStreams removeAllObjects];
       [peerConnection.remoteTracks removeAllObjects];
 
-      // Clean up peerConnection's dataChannels.
+      // Stop delivering data channel events. There is no need to close the
+      // RTCDataChannel because it is owned by the RTCPeerConnection and the
+      // latter will close the former.
       NSMutableDictionary<NSString*, RTCDataChannel*>* dataChannels = peerConnection.dataChannels;
       for (NSString* dataChannelId in dataChannels) {
         dataChannels[dataChannelId].delegate = nil;
-        // There is no need to close the RTCDataChannel because it is owned by the
-        // RTCPeerConnection and the latter will close the former.
       }
-      [dataChannels removeAllObjects];
+
+      if (isDispose) {
+        // Dart cancels its event subscriptions before it calls dispose, so this
+        // is the first point where the stream handlers can go without leaving a
+        // pending cancel unanswered. Releasing them on close would do exactly that.
+        for (NSString* dataChannelId in dataChannels) {
+          [dataChannels[dataChannelId].eventChannel setStreamHandler:nil];
+          dataChannels[dataChannelId].eventChannel = nil;
+        }
+        [dataChannels removeAllObjects];
+        [peerConnection.eventChannel setStreamHandler:nil];
+        peerConnection.eventChannel = nil;
+        [self.peerConnections removeObjectForKey:peerConnectionId];
+      }
     }
     [self deactiveRtcAudioSession];
     result(nil);
@@ -1121,7 +1225,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       NSNumber* viewId = argsMap[@"viewId"];
       FlutterRTCVideoPlatformViewController* render = _platformViewFactory.renders[viewId];
       if(render != nil) {
-        render.videoTrack = nil;
+        [render dispose];
         [_platformViewFactory.renders removeObjectForKey:viewId];
       }
       result(nil);
@@ -1888,6 +1992,63 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       NSNumber* value = call.arguments[@"value"];
       adm.voiceProcessingBypassed = value.boolValue;
       result(nil);
+    } else if ([@"getMicrophoneMuteMode" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      result([FlutterWebRTCPlugin stringForMuteMode:adm.muteMode]);
+    } else if ([@"setMicrophoneMuteMode" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      NSString* modeString = call.arguments[@"mode"];
+      RTCAudioEngineMuteMode mode = [FlutterWebRTCPlugin muteModeForString:modeString];
+      if (mode == RTCAudioEngineMuteModeUnknown) {
+        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                                   message:[NSString stringWithFormat:@"Error: invalid mute mode: %@", modeString]
+                                   details:nil]);
+        return;
+      }
+      // With mode restartEngine a mute-state transition rebuilds the audio
+      // engine, so keep this off the platform thread like the recording APIs.
+      dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSInteger admResult = [adm setMuteMode:mode];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (admResult == 0) {
+            result(nil);
+          } else {
+            result([FlutterError
+                errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                      message:[NSString stringWithFormat:@"Error: adm api failed with code: %ld",
+                                                         (long)admResult]
+                      details:nil]);
+          }
+        });
+      });
+    } else if ([@"isMicrophoneMuted" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      result([NSNumber numberWithBool:adm.isMicrophoneMuted]);
+    } else if ([@"setMicrophoneMuted" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      NSNumber* muted = call.arguments[@"muted"];
+      if (![muted isKindOfClass:[NSNumber class]]) {
+        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                                   message:@"Error: muted is required"
+                                   details:nil]);
+        return;
+      }
+      // With mode restartEngine muting rebuilds the audio engine, so keep
+      // this off the platform thread like the recording APIs.
+      dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSInteger admResult = [adm setMicrophoneMuted:muted.boolValue];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (admResult == 0) {
+            result(nil);
+          } else {
+            result([FlutterError
+                errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                      message:[NSString stringWithFormat:@"Error: adm api failed with code: %ld",
+                                                         (long)admResult]
+                      details:nil]);
+          }
+        });
+      });
     } else {
       if([self handleFrameCryptorMethodCall:call result:result]) {
           return;
@@ -1934,12 +2095,24 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 #endif
 }
 
+- (BOOL)hasOpenPeerConnection {
+  // Closed connections stay registered until dispose but must not keep the
+  // audio session alive. The flag avoids a blocking signalingState read per
+  // connection on the platform thread.
+  for (RTCPeerConnection* peerConnection in self.peerConnections.allValues) {
+    if (!peerConnection.closedByPlugin) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
 - (void)deactiveRtcAudioSession {
 #if TARGET_OS_IPHONE
   if (!self.audioSessionManagementEnabled) {
     return;
   }
-  if (![self hasLocalAudioTrack] && self.peerConnections.count == 0) {
+  if (![self hasLocalAudioTrack] && ![self hasOpenPeerConnection]) {
     // The call session is fully over: the speaker preference is per-call
     // state, so drop it (and any mode/options it leaked into the shared
     // WebRTC configuration) so the next call starts from a clean default
@@ -2132,6 +2305,13 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 - (nonnull RTCConfiguration*)RTCConfiguration:(id)json {
   RTCConfiguration* config = [[RTCConfiguration alloc] init];
 
+  // WARP also marks the packets with DSCP; the field trial that carries the DTLS
+  // handshake in the STUN exchange was applied in -initialize:. An explicit
+  // `enableDscp` in the configuration below still wins.
+  if (gWarpEnabled) {
+    config.enableDscp = YES;
+  }
+
   if (!json) {
     return config;
   }
@@ -2144,6 +2324,11 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   if (json[@"audioJitterBufferMaxPackets"] != nil &&
       [json[@"audioJitterBufferMaxPackets"] isKindOfClass:[NSNumber class]]) {
     config.audioJitterBufferMaxPackets = [json[@"audioJitterBufferMaxPackets"] intValue];
+  }
+
+  if (json[@"enableSctpSnap"] != nil &&
+      [json[@"enableSctpSnap"] isKindOfClass:[NSNumber class]]) {
+    config.enableSctpSnap = [json[@"enableSctpSnap"] boolValue];
   }
 
   if (json[@"bundlePolicy"] != nil && [json[@"bundlePolicy"] isKindOfClass:[NSString class]]) {
@@ -2194,7 +2379,8 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   }
 
   if (json[@"enableDscp"] != nil && [json[@"enableDscp"] isKindOfClass:[NSNumber class]]) {
-    config.enableDscp = [json[@"enableDscp"] boolValue];
+    NSNumber* enableDscp = json[@"enableDscp"];
+    config.enableDscp = [enableDscp boolValue];
   }
 
   if (json[@"rtcpMuxPolicy"] != nil && [json[@"rtcpMuxPolicy"] isKindOfClass:[NSString class]]) {
@@ -2312,6 +2498,10 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     BOOL sframeRequireFrameEncryption = NO;
     BOOL srtpEnableEncryptedRtpHeaderExtensions = NO;
     BOOL srtpEnableAes128Sha1_32CryptoCipher = NO;
+    // Defaults from webrtc::CryptoOptions::Srtp: GCM is offered last unless
+    // preferred, and AES128_CM_SHA1_80 (the mandatory-to-implement cipher) is on.
+    BOOL srtpPreferGcmCryptoSuites = NO;
+    BOOL srtpEnableAes128Sha1_80CryptoCipher = YES;
 
     if (options[@"enableGcmCryptoSuites"] != nil &&
         [options[@"enableGcmCryptoSuites"] isKindOfClass:[NSNumber class]]) {
@@ -2337,11 +2527,25 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       srtpEnableAes128Sha1_32CryptoCipher = [value boolValue];
     }
 
+    if (options[@"preferGcmCryptoSuites"] != nil &&
+        [options[@"preferGcmCryptoSuites"] isKindOfClass:[NSNumber class]]) {
+      NSNumber* value = options[@"preferGcmCryptoSuites"];
+      srtpPreferGcmCryptoSuites = [value boolValue];
+    }
+
+    if (options[@"enableAes128Sha1_80CryptoCipher"] != nil &&
+        [options[@"enableAes128Sha1_80CryptoCipher"] isKindOfClass:[NSNumber class]]) {
+      NSNumber* value = options[@"enableAes128Sha1_80CryptoCipher"];
+      srtpEnableAes128Sha1_80CryptoCipher = [value boolValue];
+    }
+
     config.cryptoOptions = [[RTCCryptoOptions alloc]
              initWithSrtpEnableGcmCryptoSuites:srtpEnableGcmCryptoSuites
+                     srtpPreferGcmCryptoSuites:srtpPreferGcmCryptoSuites
            srtpEnableAes128Sha1_32CryptoCipher:srtpEnableAes128Sha1_32CryptoCipher
+           srtpEnableAes128Sha1_80CryptoCipher:srtpEnableAes128Sha1_80CryptoCipher
         srtpEnableEncryptedRtpHeaderExtensions:srtpEnableEncryptedRtpHeaderExtensions
-                  sframeRequireFrameEncryption:(BOOL)sframeRequireFrameEncryption];
+                  sframeRequireFrameEncryption:sframeRequireFrameEncryption];
   }
 
   return config;
