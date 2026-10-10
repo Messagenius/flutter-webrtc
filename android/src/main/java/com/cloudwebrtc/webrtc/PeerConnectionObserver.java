@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.webrtc.AudioTrack;
 import org.webrtc.CandidatePairChangeEvent;
@@ -48,13 +49,17 @@ import org.webrtc.VideoTrack;
 
 class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.StreamHandler {
   private final static String TAG = FlutterWebRTCPlugin.TAG;
-  private final Map<String, DataChannel> dataChannels = new HashMap<>();
+  // onDataChannel writes from the signaling thread while the method handlers
+  // read, write and iterate from the platform thread.
+  private final Map<String, DataChannel> dataChannels = new ConcurrentHashMap<>();
+  private final Map<String, DataChannelObserver> dataChannelObservers = new ConcurrentHashMap<>();
   private final BinaryMessenger messenger;
   private final String id;
   private PeerConnection peerConnection;
   private final PeerConnection.RTCConfiguration configuration;
   final Map<String, MediaStream> remoteStreams = new HashMap<>();
-  final Map<String, MediaStreamTrack> remoteTracks = new HashMap<>();
+  private final RemoteTrackRegistry<MediaStreamTrack> remoteTracks =
+      new RemoteTrackRegistry<>();
   final Map<String, RtpTransceiver> transceivers = new HashMap<>();
   private final StateProvider stateProvider;
   private final EventChannel eventChannel;
@@ -102,11 +107,18 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     peerConnection.close();
     remoteStreams.clear();
     remoteTracks.clear();
-    dataChannels.clear();
+    // The data channels stay registered until dispose() so that their event
+    // channel handlers can be released there. Closing the peer connection
+    // already closes them.
   }
 
   void dispose() {
     this.close();
+    // Data channels go before the peer connection because unregistering an
+    // observer needs a live connection.
+    for (String dataChannelId : new ArrayList<>(dataChannels.keySet())) {
+      disposeDataChannel(dataChannelId);
+    }
     peerConnection.dispose();
     eventChannel.setStreamHandler(null);
   }
@@ -154,9 +166,29 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     DataChannel dataChannel = dataChannels.get(dataChannelId);
     if (dataChannel != null) {
       dataChannel.close();
-      dataChannels.remove(dataChannelId);
+      // The Dart side cancels its event subscription before it calls this, so
+      // nothing is left that needs the event channel handler.
+      disposeDataChannel(dataChannelId);
     } else {
       Log.d(TAG, "dataChannelClose() dataChannel is null");
+    }
+  }
+
+  /**
+   * Releases the observer and the Java wrapper for a data channel and forgets
+   * about it. The wrapper owns a reference to the native channel that
+   * PeerConnection.dispose() does not release, so it is disposed here. The
+   * observer goes first because unregistering it needs a wrapper that has not
+   * been disposed yet.
+   */
+  private void disposeDataChannel(String dataChannelId) {
+    DataChannelObserver observer = dataChannelObservers.remove(dataChannelId);
+    if (observer != null) {
+      observer.dispose();
+    }
+    DataChannel dataChannel = dataChannels.remove(dataChannelId);
+    if (dataChannel != null) {
+      dataChannel.dispose();
     }
   }
 
@@ -417,6 +449,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       String trackId = track.id();
 
       remoteTracks.put(trackId, track);
+      stateProvider.onRemoteTrackAdded(id, streamId, track);
 
       ConstraintsMap trackInfo = new ConstraintsMap();
       trackInfo.putString("id", trackId);
@@ -432,6 +465,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       String trackId = track.id();
 
       remoteTracks.put(trackId, track);
+      stateProvider.onRemoteTrackAdded(id, streamId, track);
 
       ConstraintsMap trackInfo = new ConstraintsMap();
       trackInfo.putString("id", trackId);
@@ -460,10 +494,10 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     String streamId = mediaStream.getId();
 
     for (VideoTrack track : mediaStream.videoTracks) {
-      this.remoteTracks.remove(track.id());
+      this.remoteTracks.remove(track.id(), track);
     }
     for (AudioTrack track : mediaStream.audioTracks) {
-      this.remoteTracks.remove(track.id());
+      this.remoteTracks.remove(track.id(), track);
     }
 
     ConstraintsMap params = new ConstraintsMap();
@@ -570,11 +604,11 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   }
 
   private void registerDataChannelObserver(String dcId, DataChannel dataChannel) {
-    // DataChannel.registerObserver implementation does not allow to
-    // unregister, so the observer is registered here and is never
-    // unregistered
-    dataChannel.registerObserver(
-        new DataChannelObserver(messenger, id, dcId, dataChannel));
+    // Keep the observer around so that its event channel handler and the
+    // native observer can be released when the channel goes away.
+    DataChannelObserver observer = new DataChannelObserver(messenger, id, dcId, dataChannel);
+    dataChannelObservers.put(dcId, observer);
+    dataChannel.registerObserver(observer);
   }
 
   @Override
@@ -1219,13 +1253,18 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     for (RtpTransceiver transceiver : transceivers) {
       RtpReceiver receiver = transceiver.getReceiver();
       if (receiver != null) {
-        if (receiver.track() != null && receiver.track().id().equals(trackId)) {
-          track = receiver.track();
+        MediaStreamTrack receiverTrack = receiver.track();
+        if (receiverTrack != null && receiverTrack.id().equals(trackId)) {
+          track = receiverTrack;
           break;
         }
       }
     }
     return track;
+  }
+
+  MediaStreamTrack getRemoteTrack(String trackId) {
+    return remoteTracks.get(trackId);
   }
 
   public String getNextDataChannelUUID() {
