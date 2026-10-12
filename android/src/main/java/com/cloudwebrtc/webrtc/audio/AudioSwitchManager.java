@@ -84,6 +84,9 @@ public class AudioSwitchManager {
      */
     private boolean manageAudioFocus = true;
 
+    /** Messagenius fork: a call started while audio session management was off. */
+    private boolean startPending = false;
+
     /**
      * The audio focus mode to use while started.
      * <br />
@@ -189,6 +192,7 @@ public class AudioSwitchManager {
 
     public void start() {
         if (!audioSessionManagementEnabled) {
+            startPending = true;
             return;
         }
         handler.post(() -> {
@@ -202,6 +206,7 @@ public class AudioSwitchManager {
     }
 
     public void stop() {
+        startPending = false;
         if (audioSwitch != null) {
             handler.post(() -> {
                 if (isActive) {
@@ -214,6 +219,18 @@ public class AudioSwitchManager {
 
     public static void setAudioSessionManagementEnabled(boolean enabled) {
         audioSessionManagementEnabled = enabled;
+    }
+
+    /**
+     * Messagenius fork: management is back on. With [resume] the session a call asked for while
+     * it was off starts now; otherwise that request is dropped (the call is over).
+     */
+    public void endHandOff(boolean resume) {
+        boolean pending = startPending;
+        startPending = false;
+        if (pending && resume) {
+            start();
+        }
     }
 
     public void setMicrophoneMute(boolean mute) {

@@ -917,6 +917,19 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         AudioSwitchManager.instance.enableSpeakerButPreferBluetooth();
         result.success(null);
         break;
+      case "setAndroidAudioSessionManagementEnabled": {
+        boolean enabled = call.argument("enabled");
+        // Messagenius fork: release audio mode, focus and routing before handing them over.
+        if (!enabled) {
+          AudioSwitchManager.instance.stop();
+        }
+        AudioSwitchManager.setAudioSessionManagementEnabled(enabled);
+        if (enabled) {
+          AudioSwitchManager.instance.endHandOff(Boolean.TRUE.equals(call.argument("resume")));
+        }
+        result.success(null);
+        break;
+      }
       case "requestCapturePermission": {
         Boolean fullScreenOnlyArg = call.argument("fullScreenOnly");
         boolean fullScreenOnly = fullScreenOnlyArg != null && fullScreenOnlyArg;
