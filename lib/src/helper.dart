@@ -251,6 +251,17 @@ class Helper {
       AndroidNativeAudioManagement.setAndroidAudioConfiguration(
           androidAudioConfiguration);
 
+  /// Messagenius fork: Android only, no-op elsewhere. When false, WebRTC leaves
+  /// audio mode, focus and routing to someone else (e.g. Telecom) and releases
+  /// them if it holds them. Turning it back on with [resume] starts the session
+  /// a call asked for meanwhile (the call goes on without the other owner).
+  static Future<void> setAndroidAudioManagementEnabled(bool enabled,
+      {bool resume = false}) async {
+    if (kIsWeb || !WebRTC.platformIsAndroid) return;
+    await WebRTC.invokeMethod('setAndroidAudioSessionManagementEnabled',
+        <String, dynamic>{'enabled': enabled, 'resume': resume});
+  }
+
   /// After Android app finishes a session, on audio focus loss, clear the active communication device.
   static Future<void> clearAndroidCommunicationDevice() =>
       WebRTC.invokeMethod('clearAndroidCommunicationDevice');
