@@ -876,9 +876,6 @@ public class GetUserMediaImpl {
         info.facingMode = facingMode;
         videoCapturer.startCapture(targetWidth, targetHeight, targetFps);
 
-        cameraEventsHandler.waitForCameraOpen();
-
-
         String trackId = stateProvider.getNextTrackUUID();
         mVideoCapturers.put(trackId, info);
         mSurfaceTextureHelpers.put(trackId, surfaceTextureHelper);
