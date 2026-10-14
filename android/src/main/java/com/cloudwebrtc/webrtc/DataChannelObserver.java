@@ -1,5 +1,8 @@
 package com.cloudwebrtc.webrtc;
 
+import android.os.Handler;
+import android.os.Looper;
+
 import com.cloudwebrtc.webrtc.utils.AnyThreadSink;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
 
@@ -27,7 +30,7 @@ class DataChannelObserver implements DataChannel.Observer, EventChannel.StreamHa
         this.dataChannel = dataChannel;
         eventChannel =
                 new EventChannel(messenger, "FlutterWebRTC/dataChannelEvent" + peerConnectionId + flutterId);
-        eventChannel.setStreamHandler(this);
+        new Handler(Looper.getMainLooper()).post(() -> eventChannel.setStreamHandler(this));
     }
 
     private String dataChannelStateString(DataChannel.State dataChannelState) {

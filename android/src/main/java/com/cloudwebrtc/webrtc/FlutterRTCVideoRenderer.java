@@ -22,21 +22,23 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
 
     private static final String TAG = FlutterWebRTCPlugin.TAG;
     private final TextureRegistry.SurfaceProducer producer;
+    private final MethodCallHandlerImpl handler;
     private int id = -1;
     private MediaStream mediaStream;
 
     private String ownerTag;
 
     public void Dispose() {
-        //destroy
-        if (surfaceTextureRenderer != null) {
-            surfaceTextureRenderer.release();
-        }
-        if (eventChannel != null)
-            eventChannel.setStreamHandler(null);
-
-        eventSink = null;
-        producer.release();
+        setVideoTrack(null);
+        surfaceTextureRenderer.release();
+        handler.runOnMainThread(() -> {
+            if (eventChannel != null) {
+                eventChannel.setStreamHandler(null);
+            }
+            eventSink = null;
+            producer.setCallback(null);
+            producer.release();
+        });
     }
 
     /**
@@ -100,14 +102,16 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
     EventChannel eventChannel;
     EventChannel.EventSink eventSink;
 
-    public FlutterRTCVideoRenderer(TextureRegistry.SurfaceProducer producer) {
-        this.surfaceTextureRenderer = new SurfaceTextureRenderer("");
+    public FlutterRTCVideoRenderer(TextureRegistry.SurfaceProducer producer, MethodCallHandlerImpl handler) {
+        this.handler = handler;
+        this.producer = producer;
+        this.surfaceTextureRenderer = new SurfaceTextureRenderer("", handler.executor);
         listenRendererEvents();
-        surfaceTextureRenderer.init(EglUtils.getRootEglBaseContext(), rendererEvents);
-        surfaceTextureRenderer.surfaceCreated(producer);
+        EglBase.Context sharedContext = EglUtils.getRootEglBaseContext();
+        surfaceTextureRenderer.init(sharedContext, rendererEvents);
+        handler.runOnMainThread(() -> surfaceTextureRenderer.surfaceCreated(producer));
 
         this.eventSink = null;
-        this.producer = producer;
         this.ownerTag = null;
     }
 
@@ -237,7 +241,7 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
             surfaceTextureRenderer.release();
             listenRendererEvents();
             surfaceTextureRenderer.init(sharedContext, rendererEvents);
-            surfaceTextureRenderer.surfaceCreated(producer);
+            handler.runOnMainThread(() -> surfaceTextureRenderer.surfaceCreated(producer));
 
             videoTrack.addSink(surfaceTextureRenderer);
         }

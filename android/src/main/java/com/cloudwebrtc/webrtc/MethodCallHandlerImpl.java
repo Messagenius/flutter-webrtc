@@ -78,6 +78,7 @@ import org.webrtc.RtpSender;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
 import org.webrtc.SessionDescription.Type;
+import org.webrtc.ThreadUtils;
 import org.webrtc.VideoTrack;
 import org.webrtc.audio.AudioDeviceModule;
 import org.webrtc.audio.JavaAudioDeviceModule;
@@ -93,8 +94,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.EventChannel;
@@ -107,12 +111,12 @@ import io.flutter.view.TextureRegistry.SurfaceTextureEntry;
 public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   static public final String TAG = "FlutterWebRTCPlugin";
 
-  private final Map<String, PeerConnectionObserver> mPeerConnectionObservers = new HashMap<>();
+  private final Map<String, PeerConnectionObserver> mPeerConnectionObservers = new ConcurrentHashMap<>();
   private final BinaryMessenger messenger;
   private final Context context;
   private final TextureRegistry textures;
   private PeerConnectionFactory mFactory;
-  private final Map<String, MediaStream> localStreams = new HashMap<>();
+  private final Map<String, MediaStream> localStreams = new ConcurrentHashMap<>();
   private final Map<String, LocalTrack> localTracks = new HashMap<>();
   private final LongSparseArray<FlutterRTCVideoRenderer> renders = new LongSparseArray<>();
 
@@ -170,6 +174,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   }
 
   void dispose() {
+    executor.execute(this::disposeOnExecutor);
+  }
+
+  private void disposeOnExecutor() {
     for (final MediaStream mediaStream : localStreams.values()) {
       try {
         streamDispose(mediaStream);
@@ -364,8 +372,108 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   @Override
   public void onMethodCall(MethodCall call, @NonNull Result notSafeResult) {
-
     final AnyThreadResult result = new AnyThreadResult(notSafeResult);
+    if (runsOnExecutor(call.method)) {
+      executor.execute(() -> {
+        try {
+          handleMethodCall(call, result);
+        } catch (Exception e) {
+          result.error("error", e.getMessage(), null);
+        }
+      });
+    } else {
+      handleMethodCall(call, result);
+    }
+  }
+
+  static boolean runsOnExecutor(String method) {
+    switch (method) {
+      case "createPeerConnection":
+      case "createLocalMediaStream":
+      case "createOffer":
+      case "createAnswer":
+      case "mediaStreamGetTracks":
+      case "addStream":
+      case "removeStream":
+      case "setLocalDescription":
+      case "setRemoteDescription":
+      case "sendDtmf":
+      case "addCandidate":
+      case "getStats":
+      case "createDataChannel":
+      case "dataChannelGetBufferedAmount":
+      case "dataChannelSend":
+      case "dataChannelClose":
+      case "streamDispose":
+      case "mediaStreamTrackSetEnable":
+      case "mediaStreamAddTrack":
+      case "mediaStreamRemoveTrack":
+      case "trackDispose":
+      case "restartIce":
+      case "peerConnectionClose":
+      case "peerConnectionDispose":
+      case "createVideoRenderer":
+      case "videoRendererDispose":
+      case "videoRendererSetSrcObject":
+      case "setVolume":
+      case "startRecordToFile":
+      case "stopRecordToFile":
+      case "captureFrame":
+      case "getLocalDescription":
+      case "getRemoteDescription":
+      case "setConfiguration":
+      case "addTrack":
+      case "removeTrack":
+      case "addTransceiver":
+      case "rtpTransceiverSetDirection":
+      case "rtpTransceiverGetDirection":
+      case "rtpTransceiverGetCurrentDirection":
+      case "rtpTransceiverStop":
+      case "rtpSenderSetParameters":
+      case "rtpSenderReplaceTrack":
+      case "rtpSenderSetTrack":
+      case "rtpSenderSetStreams":
+      case "getSenders":
+      case "getReceivers":
+      case "getTransceivers":
+      case "getRtpSenderCapabilities":
+      case "getRtpReceiverCapabilities":
+      case "setCodecPreferences":
+      case "getSignalingState":
+      case "getIceGatheringState":
+      case "getIceConnectionState":
+      case "getConnectionState":
+      case "createDataPacketCryptor":
+        return true;
+      default:
+        return method.startsWith("frameCryptor") || method.startsWith("keyProvider")
+                || method.startsWith("dataPacketCryptor");
+    }
+  }
+
+  void runOnMainThread(Runnable operation) {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      operation.run();
+      return;
+    }
+    CountDownLatch completion = new CountDownLatch(1);
+    AtomicReference<RuntimeException> failure = new AtomicReference<>();
+    mainHandler.post(() -> {
+      try {
+        operation.run();
+      } catch (RuntimeException e) {
+        failure.set(e);
+      } finally {
+        completion.countDown();
+      }
+    });
+    ThreadUtils.awaitUninterruptibly(completion);
+    if (failure.get() != null) {
+      throw failure.get();
+    }
+  }
+
+  private void handleMethodCall(MethodCall call, @NonNull AnyThreadResult result) {
     switch (call.method) {
       case "initialize": {
         int networkIgnoreMask = Options.ADAPTER_TYPE_UNKNOWN;
@@ -683,18 +791,21 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         break;
       }
       case "createVideoRenderer": {
-        TextureRegistry.SurfaceProducer producer = textures.createSurfaceProducer();
-        FlutterRTCVideoRenderer render = new FlutterRTCVideoRenderer(producer);
+        AtomicReference<TextureRegistry.SurfaceProducer> producerRef = new AtomicReference<>();
+        runOnMainThread(() -> producerRef.set(textures.createSurfaceProducer()));
+        TextureRegistry.SurfaceProducer producer = producerRef.get();
+        FlutterRTCVideoRenderer render = new FlutterRTCVideoRenderer(producer, this);
         renders.put(producer.id(), render);
 
-        EventChannel eventChannel =
-                new EventChannel(
-                        messenger,
-                        "FlutterWebRTC/Texture" + producer.id());
-
-        eventChannel.setStreamHandler(render);
-        render.setEventChannel(eventChannel);
-        render.setId((int) producer.id());
+        runOnMainThread(() -> {
+          EventChannel eventChannel =
+                  new EventChannel(
+                          messenger,
+                          "FlutterWebRTC/Texture" + producer.id());
+          eventChannel.setStreamHandler(render);
+          render.setEventChannel(eventChannel);
+          render.setId((int) producer.id());
+        });
 
         ConstraintsMap params = new ConstraintsMap();
         params.putInt("textureId", (int) producer.id());
@@ -1493,7 +1604,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   public String peerConnectionInit(ConstraintsMap configuration, ConstraintsMap constraints) {
     String peerConnectionId = getNextStreamUUID();
     RTCConfiguration conf = parseRTCConfiguration(configuration);
-    PeerConnectionObserver observer = new PeerConnectionObserver(conf, this, messenger, peerConnectionId);
+    PeerConnectionObserver observer = new PeerConnectionObserver(conf, this, messenger, peerConnectionId, executor, mainHandler);
     PeerConnection peerConnection
             = mFactory.createPeerConnection(
             conf,
@@ -1556,9 +1667,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
     do {
       uuid = UUID.randomUUID().toString();
-    } while (getTrackForId(uuid, null) != null);
+    } while (getLocalTrack(uuid) != null || hasRemoteTrack(uuid));
 
     return uuid;
+  }
+
+  private boolean hasRemoteTrack(String trackId) {
+    for (PeerConnectionObserver observer : mPeerConnectionObservers.values()) {
+      if (observer.remoteTracks.containsKey(trackId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override

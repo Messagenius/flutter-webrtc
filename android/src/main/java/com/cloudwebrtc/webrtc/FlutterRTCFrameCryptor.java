@@ -1,6 +1,8 @@
 package com.cloudwebrtc.webrtc;
 
 import android.util.Log;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.annotation.NonNull;
 
@@ -33,7 +35,7 @@ public class FlutterRTCFrameCryptor {
         public FrameCryptorStateObserver(BinaryMessenger messenger, String frameCryptorId){
             this.frameCryptorId = frameCryptorId;
             eventChannel = new EventChannel(messenger, "FlutterWebRTC/frameCryptorEvent" + frameCryptorId);
-            eventChannel.setStreamHandler(new EventChannel.StreamHandler() {
+            new Handler(Looper.getMainLooper()).post(() -> eventChannel.setStreamHandler(new EventChannel.StreamHandler() {
                 @Override
                 public void onListen(Object o, EventChannel.EventSink sink) {
                     eventSink = new AnyThreadSink(sink);
@@ -46,7 +48,7 @@ public class FlutterRTCFrameCryptor {
                 public void onCancel(Object o) {
                     eventSink = null;
                 }
-            });
+            }));
         }
         private final EventChannel eventChannel;
         private EventChannel.EventSink eventSink;

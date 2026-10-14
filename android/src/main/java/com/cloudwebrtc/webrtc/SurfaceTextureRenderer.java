@@ -11,6 +11,7 @@ import org.webrtc.ThreadUtils;
 import org.webrtc.VideoFrame;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 
 import io.flutter.view.TextureRegistry;
 
@@ -18,7 +19,7 @@ import io.flutter.view.TextureRegistry;
  * Display the video stream on a Surface.
  * renderFrame() is asynchronous to avoid blocking the calling thread.
  * This class is thread safe and handles access from potentially three different threads:
- * Interaction from the main app in init, release and setMirror.
+ * Interaction from the plugin executor in init and release.
  * Interaction from C++ rtc::VideoSinkInterface in renderFrame.
  * Interaction from SurfaceHolder lifecycle in surfaceCreated, surfaceChanged, and surfaceDestroyed.
  */
@@ -35,8 +36,9 @@ public class SurfaceTextureRenderer extends EglRenderer {
   /**
    * In order to render something, you must first call init().
    */
-  public SurfaceTextureRenderer(String name) {
+  public SurfaceTextureRenderer(String name, Executor executor) {
     super(name);
+    this.executor = executor;
   }
 
   public void init(final EglBase.Context sharedContext,
@@ -53,7 +55,6 @@ public class SurfaceTextureRenderer extends EglRenderer {
   public void init(final EglBase.Context sharedContext,
                    RendererCommon.RendererEvents rendererEvents, final int[] configAttributes,
                    RendererCommon.GlDrawer drawer) {
-    ThreadUtils.checkIsOnMainThread();
     this.rendererEvents = rendererEvents;
     synchronized (layoutLock) {
       isFirstFrameRendered = false;
@@ -99,6 +100,9 @@ public class SurfaceTextureRenderer extends EglRenderer {
   @Override
   public void onFrame(VideoFrame frame) {
     synchronized (surfaceLock) {
+      if (released || !surfaceAvailable) {
+        return;
+      }
       if(surface == null) {
         producer.setSize(frame.getRotatedWidth(),frame.getRotatedHeight());
         surface = producer.getSurface();
@@ -130,44 +134,73 @@ public class SurfaceTextureRenderer extends EglRenderer {
     }
   }
 
-  // Guards surface lifecycle transitions: creation/recreation happens on the
-  // frame delivery thread while destruction arrives on the main thread via
-  // the producer's onSurfaceCleanup callback. Serializing the two prevents a
-  // frame from re-creating the EGL surface against a Surface the producer is
-  // concurrently invalidating. surfaceDestroyed() blocks on the EGL release
-  // while holding this lock; the latch is signaled by the EglRenderer render
-  // thread, which never acquires it, so the wait cannot deadlock.
   private final Object surfaceLock = new Object();
+  private final Executor executor;
   private Surface surface = null;
+  private boolean released = true;
+  private boolean surfaceAvailable = true;
+  private int rendererGeneration;
+  private int cleanupGeneration;
 
   private TextureRegistry.SurfaceProducer producer;
 
+  @Override
+  public void release() {
+    synchronized (surfaceLock) {
+      released = true;
+      rendererGeneration++;
+      surface = null;
+    }
+    super.release();
+  }
+
   public void surfaceCreated(final TextureRegistry.SurfaceProducer producer) {
     ThreadUtils.checkIsOnMainThread();
-    this.producer = producer;
-    this.producer.setCallback(
+    synchronized (surfaceLock) {
+      this.producer = producer;
+      released = false;
+    }
+    producer.setCallback(
             new TextureRegistry.SurfaceProducer.Callback() {
               @Override
               public void onSurfaceAvailable() {
-                // Do surface initialization here, and draw the current frame.
+                final int generation;
+                synchronized (surfaceLock) {
+                  generation = cleanupGeneration;
+                }
+                executor.execute(() -> {
+                  synchronized (surfaceLock) {
+                    if (generation == cleanupGeneration) {
+                      surfaceAvailable = true;
+                    }
+                  }
+                });
               }
 
               @Override
               public void onSurfaceCleanup() {
-                surfaceDestroyed();
+                final int generation;
+                synchronized (surfaceLock) {
+                  surfaceAvailable = false;
+                  cleanupGeneration++;
+                  generation = rendererGeneration;
+                }
+                executor.execute(() -> surfaceDestroyed(generation));
               }
             }
     );
   }
 
-  public void surfaceDestroyed() {
-    ThreadUtils.checkIsOnMainThread();
+  private void surfaceDestroyed(int generation) {
+    final CountDownLatch completionLatch = new CountDownLatch(1);
     synchronized (surfaceLock) {
-      final CountDownLatch completionLatch = new CountDownLatch(1);
+      if (generation != rendererGeneration) {
+        return;
+      }
       releaseEglSurface(completionLatch::countDown);
-      ThreadUtils.awaitUninterruptibly(completionLatch);
       surface = null;
     }
+    ThreadUtils.awaitUninterruptibly(completionLatch);
   }
 
   // Update frame dimensions and report any changes to |rendererEvents|.

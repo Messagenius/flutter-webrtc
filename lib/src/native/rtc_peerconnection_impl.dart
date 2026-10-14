@@ -438,6 +438,9 @@ class RTCPeerConnectionNative extends RTCPeerConnection {
 
   @override
   Future<void> addCandidate(RTCIceCandidate candidate) async {
+    if (candidate.candidate?.isEmpty ?? true) {
+      return;
+    }
     try {
       await WebRTC.invokeMethod('addCandidate', <String, dynamic>{
         'peerConnectionId': _peerConnectionId,

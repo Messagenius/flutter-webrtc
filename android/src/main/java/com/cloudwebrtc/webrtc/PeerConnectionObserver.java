@@ -1,6 +1,7 @@
 package com.cloudwebrtc.webrtc;
 
 import android.util.Log;
+import android.os.Handler;
 
 import androidx.annotation.Nullable;
 
@@ -27,6 +28,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 
 import org.webrtc.AudioTrack;
 import org.webrtc.CandidatePairChangeEvent;
@@ -48,26 +51,31 @@ import org.webrtc.VideoTrack;
 
 class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.StreamHandler {
   private final static String TAG = FlutterWebRTCPlugin.TAG;
-  private final Map<String, DataChannel> dataChannels = new HashMap<>();
+  private final Map<String, DataChannel> dataChannels = new ConcurrentHashMap<>();
   private final BinaryMessenger messenger;
   private final String id;
-  private PeerConnection peerConnection;
+  private volatile PeerConnection peerConnection;
   private final PeerConnection.RTCConfiguration configuration;
-  final Map<String, MediaStream> remoteStreams = new HashMap<>();
-  final Map<String, MediaStreamTrack> remoteTracks = new HashMap<>();
+  final Map<String, MediaStream> remoteStreams = new ConcurrentHashMap<>();
+  final Map<String, MediaStreamTrack> remoteTracks = new ConcurrentHashMap<>();
   final Map<String, RtpTransceiver> transceivers = new HashMap<>();
   private final StateProvider stateProvider;
   private final EventChannel eventChannel;
-  private EventChannel.EventSink eventSink;
+  private volatile EventChannel.EventSink eventSink;
+  private final ExecutorService executor;
+  private final Handler mainHandler;
+  private volatile boolean closed;
 
-  PeerConnectionObserver(PeerConnection.RTCConfiguration configuration, StateProvider stateProvider, BinaryMessenger messenger, String id) {
+  PeerConnectionObserver(PeerConnection.RTCConfiguration configuration, StateProvider stateProvider, BinaryMessenger messenger, String id, ExecutorService executor, Handler mainHandler) {
     this.configuration = configuration;
     this.stateProvider = stateProvider;
     this.messenger = messenger;
     this.id = id;
+    this.executor = executor;
+    this.mainHandler = mainHandler;
 
     eventChannel = new EventChannel(messenger, "FlutterWebRTC/peerConnectionEvent" + id);
-    eventChannel.setStreamHandler(this);
+    mainHandler.post(() -> eventChannel.setStreamHandler(this));
   }
 
   static private void resultError(String method, String error, Result result) {
@@ -99,6 +107,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   }
 
   void close() {
+    closed = true;
     peerConnection.close();
     remoteStreams.clear();
     remoteTracks.clear();
@@ -108,7 +117,8 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   void dispose() {
     this.close();
     peerConnection.dispose();
-    eventChannel.setStreamHandler(null);
+    peerConnection = null;
+    mainHandler.post(() -> eventChannel.setStreamHandler(null));
   }
 
   void createDataChannel(String label, ConstraintsMap config, Result result) {
@@ -384,6 +394,9 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   @Override
   public void onAddStream(MediaStream mediaStream) {
+    if (closed) {
+      return;
+    }
     String streamUID = null;
     String streamId = mediaStream.getId();
     // The native WebRTC implementation has a special concept of a default
@@ -456,7 +469,9 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   @Override
   public void onRemoveStream(MediaStream mediaStream) {
-
+    if (closed) {
+      return;
+    }
     String streamId = mediaStream.getId();
 
     for (VideoTrack track : mediaStream.videoTracks) {
@@ -478,6 +493,10 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   @Override
   public void onAddTrack(RtpReceiver receiver, MediaStream[] mediaStreams) {
+    if (closed) {
+      return;
+    }
+    remoteTracks.put(receiver.track().id(), receiver.track());
     Log.d(TAG, "onAddTrack");
     // for plan-b
     for (MediaStream stream : mediaStreams) {
@@ -518,24 +537,33 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     params.putMap("track", mediaTrackToMap(receiver.track()));
     params.putMap("receiver", rtpReceiverToMap(receiver));
 
-    if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN) {
-      List<RtpTransceiver> transceivers = peerConnection.getTransceivers();
-      for (RtpTransceiver transceiver : transceivers) {
-        if (transceiver.getReceiver() != null && receiver.id().equals(transceiver.getReceiver().id())) {
-          String transceiverId = transceiver.getMid();
-          if (null == transceiverId) {
-            transceiverId = stateProvider.getNextStreamUUID();
-            this.transceivers.put(transceiverId,transceiver);
+    String receiverId = receiver.id();
+    executor.execute(() -> {
+      if (closed || peerConnection == null) {
+        return;
+      }
+      if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN) {
+        List<RtpTransceiver> transceivers = peerConnection.getTransceivers();
+        for (RtpTransceiver transceiver : transceivers) {
+          if (transceiver.getReceiver() != null && receiverId.equals(transceiver.getReceiver().id())) {
+            String transceiverId = transceiver.getMid();
+            if (null == transceiverId) {
+              transceiverId = stateProvider.getNextStreamUUID();
+              this.transceivers.put(transceiverId,transceiver);
+            }
+            params.putMap("transceiver", transceiverToMap(transceiverId, transceiver));
           }
-          params.putMap("transceiver", transceiverToMap(transceiverId, transceiver));
         }
       }
-    }
-    sendEvent(params);
+      sendEvent(params);
+    });
   }
 
   @Override
   public void onRemoveTrack(RtpReceiver rtpReceiver) {
+    if (closed) {
+      return;
+    }
     Log.d(TAG, "onRemoveTrack");
 
     MediaStreamTrack track = rtpReceiver.track();
@@ -556,6 +584,9 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   @Override
   public void onDataChannel(DataChannel dataChannel) {
+    if (closed) {
+      return;
+    }
     String flutterId = getNextDataChannelUUID();
     ConstraintsMap params = new ConstraintsMap();
     params.putString("event", "didOpenDataChannel");
