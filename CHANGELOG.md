@@ -1,7 +1,58 @@
 
 # Changelog
 
-[Unreleased]
+
+[1.6.2+hotfix.4] - 2026-10-07
+
+* [Darwin] fix(crash): do not dereference a freed video renderer from the first frame callback. Disposing a renderer while frames are in flight no longer crashes with `EXC_BAD_ACCESS` in `-[FlutterRTCVideoRenderer renderFrame:]` (#2190).
+* [Darwin] fix: keep `sharedSingleton` on the plugin instance that owns the peer connection factory. A second Flutter engine no longer replaces it with an instance that has no factory (#2186).
+* [iOS] refactor: take the audio session configuration lock once in `ensureAudioSession` (#2195).
+* [Android] fix: dispose video renderers when the plugin detaches from the engine (#2192).
+* [Android/Darwin/Windows/Linux] fix: enable SCTP SNAP instead of DSCP marking when WARP is enabled. Windows and Linux move to libwebrtc m150.7871.03 (#2188).
+* [Dart] fix: `RTCDataChannel.close()` moves the channel to the closed state and notifies listeners. `send()` after `close()` throws instead of reaching the platform (#2191).
+* [Windows/Linux] fix: synchronize data channel observer map access across the signaling and platform threads (#2194).
+
+[1.6.2+hotfix.3] - 2026-09-15
+
+* [Windows/Linux] fix: fixed fieldTrials copy in libwebrtc to fix WARP bug for Windows/Linux.
+* [Darwin] fix(darwin): stop leaking every platform view that is disposed (#2179).
+
+[1.6.2+hotfix.2] - 2026-09-14
+
+* [Darwin] fix: release event channel stream handlers on `peerConnectionDispose` instead of `peerConnectionClose`. `close()` followed by `dispose()` no longer reports `MissingPluginException` for `cancel` on `FlutterWebRTC/peerConnectionEvent` (#2172).
+* [Android] fix: release data channel event channel handlers and dispose the Java `DataChannel` wrapper when a channel is closed or its peer connection is disposed (#2174).
+* [Dart] fix: `RTCPeerConnection.dispose()` closes every data channel the connection created or received. `RTCDataChannel.close()` on native platforms is idempotent (#2175).
+* [Windows/Linux] fix(crash): keep the PeerConnection observer alive during disposal (#2171).
+
+[1.6.2+hotfix.1] - 2026-09-08
+
+* [Windows/Linux] fix(crash): Do not access the WebRTC API before calling EnsureWebRTCInitialized (#2169)
+
+[1.6.2] - 2026-09-07
+
+* [Darwin/Android/Windows/Linux] Add WARP support.
+
+[1.6.1] - 2026-09-01
+
+* [Darwin/Android/Windows/Linux] feat: upgrade libwebrtc to 150.7871.01.
+
+[1.6.0+hotfix.1] - 2026-08-21
+
+* [Darwin] fix: bump Webrtc.xcframework to 144.7559.10 to fix the regression.
+
+[1.6.0] - 2026-07-29
+
+* [Darwin] feat: Swift Package Manager support. Apps with Flutter's SPM integration enabled consume the plugin as a Swift package automatically; CocoaPods remains fully supported (#2062).
+* [iOS] fix: replace the private `RPSystemBroadcastPickerView` `buttonPressed:` selector with public UIKit APIs, App Store review rejected binaries containing it (#2121).
+* [Darwin/Android] fix: serialize data channel `eventSink`/`eventQueue` access between the WebRTC signaling thread and the platform thread. On iOS the unsynchronized access could crash with `EXC_BAD_ACCESS` in `objc_retain` inside `-[RTCDataChannel(Flutter) onListenWithArguments:eventSink:]` (#2118).
+* [Darwin] feat: expose the audio device module's microphone mute mode (`Helper.setMicrophoneMuteMode` / `Helper.getMicrophoneMuteMode`). `voiceProcessing` (the default) plays the platform mute tone on mute/unmute; `inputMixer` and `restartEngine` mute silently (#2098, #2105).
+* [Darwin/Android] feat: add ADM-level microphone mute (`Helper.setMicrophoneMuted` / `Helper.isMicrophoneMuted`), independent of `MediaStreamTrack.enabled` (#2105).
+* [iOS/macOS] feat: `RTCVideoPlatformView.placeholderBuilder` to show a widget until the first frame renders (#2102).
+* [Android] feat: option to disable the built-in hardware AEC/NS (#2104).
+* [Android] feat: expose `getStreamForId` to embedders (#2109).
+* [Android] fix: stop-time deadlock/ANR in `OrientationAwareScreenCapturer` (#2092).
+* [Android] fix: NPE in `setFocusPoint`/`setExposurePoint` when the orientation cache was never populated (#2113).
+* [Darwin] fix: create the parent directory before `captureFrame` writes the image file (#2090).
 
 [1.5.2] - 2026-06-20
 

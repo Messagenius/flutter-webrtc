@@ -24,7 +24,7 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
     private final TextureRegistry.SurfaceProducer producer;
     private final MethodCallHandlerImpl handler;
     private int id = -1;
-    private MediaStream mediaStream;
+    private String mediaStreamId;
 
     private String ownerTag;
 
@@ -98,6 +98,7 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
      * The {@code VideoTrack}, if any, rendered by this {@code FlutterRTCVideoRenderer}.
      */
     private VideoTrack videoTrack;
+    private String videoTrackId;
 
     EventChannel eventChannel;
     EventChannel.EventSink eventSink;
@@ -138,7 +139,14 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
      * resources (if rendering is in progress).
      */
     private void removeRendererFromVideoTrack() {
-        videoTrack.removeSink(surfaceTextureRenderer);
+        if (videoTrack == null) {
+            return;
+        }
+        try {
+            videoTrack.removeSink(surfaceTextureRenderer);
+        } catch (IllegalStateException e) {
+            Log.w(TAG, "VideoTrack was disposed before its renderer was removed");
+        }
     }
 
     /**
@@ -151,7 +159,7 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
      */
     public void setStream(MediaStream mediaStream, String ownerTag) {
         VideoTrack videoTrack;
-        this.mediaStream = mediaStream;
+        this.mediaStreamId = mediaStream == null ? null : mediaStream.getId();
         this.ownerTag = ownerTag;
         if (mediaStream == null) {
             videoTrack = null;
@@ -175,7 +183,7 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
      */
     public void setStream(MediaStream mediaStream,String trackId, String ownerTag) {
         VideoTrack videoTrack;
-        this.mediaStream = mediaStream;
+        this.mediaStreamId = mediaStream == null ? null : mediaStream.getId();
         this.ownerTag = ownerTag;
         if (mediaStream == null) {
             videoTrack = null;
@@ -195,6 +203,20 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
     }
 
     /**
+     * Sets a video track already resolved from its owning PeerConnection.
+     *
+     * The stream id is retained only for renderer lifecycle bookkeeping. The
+     * MediaStream wrapper itself may be replaced or disposed by a Unified Plan
+     * renegotiation while the logical stream and track ids remain unchanged.
+     */
+    public void setTrack(
+            VideoTrack videoTrack, String mediaStreamId, String ownerTag) {
+        this.mediaStreamId = mediaStreamId;
+        this.ownerTag = ownerTag;
+        setVideoTrack(videoTrack);
+    }
+
+    /**
      * Sets the {@code VideoTrack} to be rendered by this {@code FlutterRTCVideoRenderer}.
      *
      * @param videoTrack The {@code VideoTrack} to be rendered by this
@@ -209,6 +231,7 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
             }
 
             this.videoTrack = videoTrack;
+            this.videoTrackId = videoTrack == null ? null : videoTrack.id();
 
             if (videoTrack != null) {
                 try {
@@ -248,16 +271,16 @@ public class FlutterRTCVideoRenderer implements EventChannel.StreamHandler {
     }
 
     public boolean checkMediaStream(String id, String ownerTag) {
-        if (null == id || null == mediaStream || ownerTag == null || !ownerTag.equals(this.ownerTag)) {
+        if (null == id || null == mediaStreamId || ownerTag == null || !ownerTag.equals(this.ownerTag)) {
             return false;
         }
-        return id.equals(mediaStream.getId());
+        return id.equals(mediaStreamId);
     }
 
     public boolean checkVideoTrack(String id, String ownerTag) {
-        if (null == id || null == videoTrack  || ownerTag == null || !ownerTag.equals(this.ownerTag)) {
+        if (null == id || null == videoTrackId || ownerTag == null || !ownerTag.equals(this.ownerTag)) {
             return false;
         }
-        return id.equals(videoTrack.id());
+        return id.equals(videoTrackId);
     }
 }
