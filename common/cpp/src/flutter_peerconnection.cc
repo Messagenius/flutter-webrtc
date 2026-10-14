@@ -894,21 +894,24 @@ void FlutterPeerConnection::RtpTransceiverStop(
   result_ptr->Success();
 }
 
-void FlutterPeerConnection::RtpTransceiverGetCurrentDirection(
+void FlutterPeerConnection::RtpTransceiverGetDirection(
     RTCPeerConnection* pc,
     std::string transceiverId,
+    bool current_direction,
     std::unique_ptr<MethodResultProxy> result) {
   std::shared_ptr<MethodResultProxy> result_ptr(result.release());
 
   auto transceiver = getRtpTransceiverById(pc, transceiverId);
   if (nullptr == transceiver.get()) {
-    result_ptr->Error("rtpTransceiverGetCurrentDirection",
+    result_ptr->Error(current_direction ? "rtpTransceiverGetCurrentDirection"
+                                        : "rtpTransceiverGetDirection",
                       "transceiver is null");
     return;
   }
   EncodableMap map;
-  map[EncodableValue("result")] = EncodableValue(
-      transceiverDirectionString(transceiver->current_direction()));
+  map[EncodableValue("result")] = EncodableValue(transceiverDirectionString(
+      current_direction ? transceiver->current_direction()
+                        : transceiver->direction()));
   result_ptr->Success(EncodableValue(map));
 }
 
