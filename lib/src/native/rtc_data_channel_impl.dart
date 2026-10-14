@@ -40,10 +40,11 @@ class RTCDataChannelNative extends RTCDataChannel {
   RTCDataChannelState? _state;
   StreamSubscription<dynamic>? _eventSubscription;
   bool _isClosed = false;
+  bool _closeComplete = false;
+  Future<void>? _closeFuture;
 
-  /// Whether close() has run on this channel. Owners use it to drop channels
-  /// they no longer have to close.
-  bool get isClosed => _isClosed;
+  /// Whether native close has finished, so owners no longer need to await it.
+  bool get isClosed => _closeComplete;
 
   @override
   RTCDataChannelState? get state => _state;
@@ -75,11 +76,12 @@ class RTCDataChannelNative extends RTCDataChannel {
     switch (map['event']) {
       case 'dataChannelStateChanged':
         _dataChannelId = map['id'];
-        _state = rtcDataChannelStateForString(map['state']);
-        onDataChannelState?.call(_state!);
+        final state = rtcDataChannelStateForString(map['state']);
+        _state = state;
+        onDataChannelState?.call(state);
 
         if (!_stateChangeController.isClosed) {
-          _stateChangeController.add(_state!);
+          _stateChangeController.add(state);
         }
         break;
       case 'dataChannelReceiveMessage':
@@ -149,25 +151,35 @@ class RTCDataChannelNative extends RTCDataChannel {
   }
 
   @override
-  Future<void> close() async {
-    // The first call wins. Owners close their channels on dispose without
-    // knowing whether the app already did, and the platform side only knows
-    // the channel once.
-    if (_isClosed) {
-      return;
+  Future<void> close() {
+    final closing = _closeFuture;
+    if (closing != null) {
+      return closing;
     }
+    final notifyClosed = _state != RTCDataChannelState.RTCDataChannelClosed;
     _isClosed = true;
     _state = RTCDataChannelState.RTCDataChannelClosed;
-    onDataChannelState?.call(_state!);
-    if (!_stateChangeController.isClosed) {
-      _stateChangeController.add(_state!);
+    return _closeFuture = Future<void>.microtask(() => _close(notifyClosed))
+        .whenComplete(() => _closeComplete = true);
+  }
+
+  Future<void> _close(bool notifyClosed) async {
+    try {
+      if (notifyClosed) {
+        onDataChannelState?.call(_state!);
+        _stateChangeController.add(_state!);
+      }
+    } finally {
+      unawaited(_stateChangeController.close());
+      unawaited(_messageController.close());
+      try {
+        await _eventSubscription?.cancel();
+      } finally {
+        await WebRTC.invokeMethod('dataChannelClose', <String, dynamic>{
+          'peerConnectionId': _peerConnectionId,
+          'dataChannelId': _flutterId
+        });
+      }
     }
-    await _stateChangeController.close();
-    await _messageController.close();
-    await _eventSubscription?.cancel();
-    await WebRTC.invokeMethod('dataChannelClose', <String, dynamic>{
-      'peerConnectionId': _peerConnectionId,
-      'dataChannelId': _flutterId
-    });
   }
 }

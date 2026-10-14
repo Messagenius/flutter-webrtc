@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -36,11 +38,13 @@ void main() {
   /// Runs once, on the next dataChannelClose the platform is asked for, so a
   /// test can make something happen while dispose() is awaiting that call.
   void Function()? duringDataChannelClose;
+  Future<void>? dataChannelCloseWait;
 
   setUp(() {
     calls.clear();
     dataChannelCloseError = null;
     duringDataChannelClose = null;
+    dataChannelCloseWait = null;
 
     methodChannel.setMockMethodCallHandler((MethodCall methodCall) async {
       switch (methodCall.method) {
@@ -53,6 +57,9 @@ void main() {
           final hook = duringDataChannelClose;
           duringDataChannelClose = null;
           hook?.call();
+          final wait = dataChannelCloseWait;
+          dataChannelCloseWait = null;
+          await wait;
           final error = dataChannelCloseError;
           dataChannelCloseError = null;
           if (error != null) {
@@ -184,7 +191,7 @@ void main() {
     expect(calls, contains('peerConnectionDispose'));
   });
 
-  test('a state callback that disposes the peer connection does not throw',
+  test('a closed callback disposes the peer once, after closing its channel',
       () async {
     final pc = RTCPeerConnectionNative(peerConnectionId, {});
     await Future<void>.delayed(Duration.zero);
@@ -193,12 +200,12 @@ void main() {
         as RTCDataChannelNative;
     await Future<void>.delayed(Duration.zero);
 
-    // Tearing the connection down from the closed state is a common app
-    // pattern. dispose() closes this channel synchronously up to its first
-    // await, so the stream controllers are gone by the time the callback
-    // returns and the event listener resumes.
     Future<void>? disposed;
+    var closedNotifications = 0;
+    final streamStates = <RTCDataChannelState>[];
+    dataChannel.stateChangeStream.listen(streamStates.add);
     dataChannel.onDataChannelState = (state) {
+      closedNotifications++;
       disposed ??= pc.dispose();
     };
 
@@ -211,7 +218,93 @@ void main() {
     await disposed;
     await Future<void>.delayed(Duration.zero);
 
-    expect(calls, contains('peerConnectionDispose'));
+    expect(closedNotifications, 1);
+    expect(streamStates, [RTCDataChannelState.RTCDataChannelClosed]);
+    expect(
+        calls.where((call) => call == 'peerConnectionDispose'), hasLength(1));
+    expect(calls.where((call) => call == 'dataChannelClose:$createdChannelId'),
+        hasLength(1));
+    expect(calls.indexOf('dataChannelClose:$createdChannelId'),
+        lessThan(calls.indexOf('peerConnectionDispose')));
+  });
+
+  for (final stream in ['state', 'message']) {
+    test('dispose completes while the $stream stream is paused', () async {
+      final pc = RTCPeerConnectionNative(peerConnectionId, {});
+      final dataChannel =
+          await pc.createDataChannel('data', RTCDataChannelInit());
+      final events = <dynamic>[];
+      var streamDone = false;
+      final publicStream = stream == 'state'
+          ? dataChannel.stateChangeStream
+          : dataChannel.messageStream;
+      final subscription =
+          publicStream.listen(events.add, onDone: () => streamDone = true);
+      subscription.pause();
+
+      var completed = false;
+      final disposal = pc.dispose().then((_) => completed = true);
+      await Future<void>.delayed(Duration.zero);
+      final completedWhilePaused = completed;
+      final nativeDisposedWhilePaused = calls.contains('peerConnectionDispose');
+      subscription.resume();
+      await disposal;
+      await Future<void>.delayed(Duration.zero);
+      await subscription.cancel();
+
+      expect(completedWhilePaused, isTrue);
+      expect(nativeDisposedWhilePaused, isTrue);
+      expect(streamDone, isTrue);
+      expect(
+          events,
+          stream == 'state'
+              ? [RTCDataChannelState.RTCDataChannelClosed]
+              : isEmpty);
+    });
+  }
+
+  test('concurrent dispose calls share one teardown', () async {
+    final pc = RTCPeerConnectionNative(peerConnectionId, {});
+    await pc.createDataChannel('data', RTCDataChannelInit());
+
+    final first = pc.dispose();
+    final second = pc.dispose();
+    await Future.wait([first, second]);
+
+    expect(identical(first, second), isTrue);
+    expect(
+        calls.where((call) => call == 'peerConnectionDispose'), hasLength(1));
+    expect(calls.where((call) => call == 'dataChannelClose:$createdChannelId'),
+        hasLength(1));
+  });
+
+  test('dispose waits for an already closing channel when another arrives',
+      () async {
+    final pc = RTCPeerConnectionNative(peerConnectionId, {});
+    final dataChannel =
+        await pc.createDataChannel('data', RTCDataChannelInit());
+    final nativeClose = Completer<void>();
+    dataChannelCloseWait = nativeClose.future;
+    final closing = dataChannel.close();
+    await Future<void>.delayed(Duration.zero);
+
+    pc.eventListener(<dynamic, dynamic>{
+      'event': 'didOpenDataChannel',
+      'id': 2,
+      'label': 'remote',
+      'flutterId': receivedChannelId,
+    });
+    final disposal = pc.dispose();
+    await Future<void>.delayed(Duration.zero);
+    final disposedBeforeClose = calls.contains('peerConnectionDispose');
+    nativeClose.complete();
+    await Future.wait([closing, disposal]);
+
+    expect(disposedBeforeClose, isFalse);
+    expect(
+        calls.where((call) => call == 'peerConnectionDispose'), hasLength(1));
+    expect(calls.where((call) => call == 'dataChannelClose:$createdChannelId'),
+        hasLength(1));
   });
 
   test('dispose completes when closing a data channel fails', () async {

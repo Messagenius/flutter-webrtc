@@ -58,6 +58,19 @@ public final class HighSpeedCamera2Capturer extends CameraCapturer {
       int width,
       int height,
       int framerate) {
+    if (!isSupported(applicationContext, cameraName, width, height, framerate)) {
+      Camera2Session.create(
+          createSessionCallback,
+          events,
+          applicationContext,
+          cameraManager,
+          surfaceTextureHelper,
+          cameraName,
+          width,
+          height,
+          framerate);
+      return;
+    }
     HighSpeedCamera2Session.create(
         createSessionCallback,
         events,

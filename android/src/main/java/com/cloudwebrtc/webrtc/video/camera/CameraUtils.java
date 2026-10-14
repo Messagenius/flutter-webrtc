@@ -27,6 +27,9 @@ import com.cloudwebrtc.webrtc.video.VideoCapturerInfo;
 import org.webrtc.Camera1Capturer;
 import org.webrtc.Camera2Capturer;
 import org.webrtc.CameraEnumerationAndroid;
+import org.webrtc.HighSpeedCamera2Capturer;
+import org.webrtc.HighSpeedCamera2Session;
+import org.webrtc.VideoCapturer;
 
 import java.lang.reflect.Field;
 import java.util.List;
@@ -64,30 +67,28 @@ public class CameraUtils {
       return;
     }
 
-    if (info.capturer instanceof Camera2Capturer) {
+    if (isCamera2Capturer(info.capturer)) {
       CameraCaptureSession captureSession;
       CameraDevice cameraDevice;
-      CameraEnumerationAndroid.CaptureFormat captureFormat;
-      int fpsUnitFactor;
+      Object session;
+      Range<Integer> captureFpsRange;
       Surface surface;
       Handler cameraThreadHandler;
       CameraManager manager;
 
       try {
-        Object session =
+        session =
                 getPrivateProperty(
                         Camera2Capturer.class.getSuperclass(), info.capturer, "currentSession");
         manager =
                 (CameraManager)
-                        getPrivateProperty(Camera2Capturer.class, info.capturer, "cameraManager");
+                        getPrivateProperty(camera2CapturerClass(info.capturer), info.capturer, "cameraManager");
         captureSession =
                 (CameraCaptureSession)
                         getPrivateProperty(session.getClass(), session, "captureSession");
         cameraDevice =
                 (CameraDevice) getPrivateProperty(session.getClass(), session, "cameraDevice");
-        captureFormat =
-                (CameraEnumerationAndroid.CaptureFormat) getPrivateProperty(session.getClass(), session, "captureFormat");
-        fpsUnitFactor = (int) getPrivateProperty(session.getClass(), session, "fpsUnitFactor");
+        captureFpsRange = getCaptureFpsRange(session);
         surface = (Surface) getPrivateProperty(session.getClass(), session, "surface");
         cameraThreadHandler =
                 (Handler) getPrivateProperty(session.getClass(), session, "cameraThreadHandler");
@@ -122,14 +123,11 @@ public class CameraUtils {
 
         captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                new Range<>(
-                        captureFormat.framerate.min / fpsUnitFactor,
-                        captureFormat.framerate.max / fpsUnitFactor));
+                captureFpsRange);
 
         //captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
         captureRequestBuilder.addTarget(surface);
-        captureSession.setRepeatingRequest(
-                captureRequestBuilder.build(), null, cameraThreadHandler);
+        setRepeatingRequest(session, captureSession, captureRequestBuilder, cameraThreadHandler);
       } catch (CameraAccessException e) {
         // Should never happen since we are already accessing the camera
         throw new RuntimeException(e);
@@ -183,30 +181,28 @@ public class CameraUtils {
       return;
     }
 
-    if (info.capturer instanceof Camera2Capturer) {
+    if (isCamera2Capturer(info.capturer)) {
       CameraCaptureSession captureSession;
       CameraDevice cameraDevice;
-      CameraEnumerationAndroid.CaptureFormat captureFormat;
-      int fpsUnitFactor;
+      Object session;
+      Range<Integer> captureFpsRange;
       Surface surface;
       Handler cameraThreadHandler;
       CameraManager manager;
 
       try {
-        Object session =
+        session =
                 getPrivateProperty(
                         Camera2Capturer.class.getSuperclass(), info.capturer, "currentSession");
         manager =
                 (CameraManager)
-                        getPrivateProperty(Camera2Capturer.class, info.capturer, "cameraManager");
+                        getPrivateProperty(camera2CapturerClass(info.capturer), info.capturer, "cameraManager");
         captureSession =
                 (CameraCaptureSession)
                         getPrivateProperty(session.getClass(), session, "captureSession");
         cameraDevice =
                 (CameraDevice) getPrivateProperty(session.getClass(), session, "cameraDevice");
-        captureFormat =
-                (CameraEnumerationAndroid.CaptureFormat) getPrivateProperty(session.getClass(), session, "captureFormat");
-        fpsUnitFactor = (int) getPrivateProperty(session.getClass(), session, "fpsUnitFactor");
+        captureFpsRange = getCaptureFpsRange(session);
         surface = (Surface) getPrivateProperty(session.getClass(), session, "surface");
         cameraThreadHandler =
                 (Handler) getPrivateProperty(session.getClass(), session, "cameraThreadHandler");
@@ -230,8 +226,7 @@ public class CameraUtils {
                 CaptureRequest.CONTROL_AF_REGIONS,
                 captureRequestBuilder == null ? null : new MeteringRectangle[] {focusRectangle});
         captureRequestBuilder.addTarget(surface);
-        captureSession.setRepeatingRequest(
-                captureRequestBuilder.build(), null, cameraThreadHandler);
+        setRepeatingRequest(session, captureSession, captureRequestBuilder, cameraThreadHandler);
       } catch (CameraAccessException e) {
         // Should never happen since we are already accessing the camera
         throw new RuntimeException(e);
@@ -277,30 +272,28 @@ public class CameraUtils {
       return;
     }
 
-    if (info.capturer instanceof Camera2Capturer) {
+    if (isCamera2Capturer(info.capturer)) {
       CameraCaptureSession captureSession;
       CameraDevice cameraDevice;
-      CameraEnumerationAndroid.CaptureFormat captureFormat;
-      int fpsUnitFactor;
+      Object session;
+      Range<Integer> captureFpsRange;
       Surface surface;
       Handler cameraThreadHandler;
       CameraManager manager;
 
       try {
-        Object session =
+        session =
                 getPrivateProperty(
                         Camera2Capturer.class.getSuperclass(), info.capturer, "currentSession");
         manager =
                 (CameraManager)
-                        getPrivateProperty(Camera2Capturer.class, info.capturer, "cameraManager");
+                        getPrivateProperty(camera2CapturerClass(info.capturer), info.capturer, "cameraManager");
         captureSession =
                 (CameraCaptureSession)
                         getPrivateProperty(session.getClass(), session, "captureSession");
         cameraDevice =
                 (CameraDevice) getPrivateProperty(session.getClass(), session, "cameraDevice");
-        captureFormat =
-                (CameraEnumerationAndroid.CaptureFormat) getPrivateProperty(session.getClass(), session, "captureFormat");
-        fpsUnitFactor = (int) getPrivateProperty(session.getClass(), session, "fpsUnitFactor");
+        captureFpsRange = getCaptureFpsRange(session);
         surface = (Surface) getPrivateProperty(session.getClass(), session, "surface");
         cameraThreadHandler =
                 (Handler) getPrivateProperty(session.getClass(), session, "cameraThreadHandler");
@@ -334,8 +327,7 @@ public class CameraUtils {
         }
 
         captureRequestBuilder.addTarget(surface);
-        captureSession.setRepeatingRequest(
-                captureRequestBuilder.build(), null, cameraThreadHandler);
+        setRepeatingRequest(session, captureSession, captureRequestBuilder, cameraThreadHandler);
       } catch (CameraAccessException e) {
         // Should never happen since we are already accessing the camera
         throw new RuntimeException(e);
@@ -374,7 +366,7 @@ public class CameraUtils {
       return;
     }
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && info.capturer instanceof Camera2Capturer) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && isCamera2Capturer(info.capturer)) {
       CameraManager manager;
       CameraDevice cameraDevice;
 
@@ -384,7 +376,7 @@ public class CameraUtils {
                         Camera2Capturer.class.getSuperclass(), info.capturer, "currentSession");
         manager =
                 (CameraManager)
-                        getPrivateProperty(Camera2Capturer.class, info.capturer, "cameraManager");
+                        getPrivateProperty(camera2CapturerClass(info.capturer), info.capturer, "cameraManager");
         cameraDevice =
                 (CameraDevice) getPrivateProperty(session.getClass(), session, "cameraDevice");
       } catch (NoSuchFieldWithNameException e) {
@@ -440,30 +432,28 @@ public class CameraUtils {
       return;
     }
 
-    if (info.capturer instanceof Camera2Capturer) {
+    if (isCamera2Capturer(info.capturer)) {
       CameraCaptureSession captureSession;
       CameraDevice cameraDevice;
-      CameraEnumerationAndroid.CaptureFormat captureFormat;
-      int fpsUnitFactor;
+      Object session;
+      Range<Integer> captureFpsRange;
       Surface surface;
       Handler cameraThreadHandler;
       CameraManager manager;
 
       try {
-        Object session =
+        session =
                 getPrivateProperty(
                         Camera2Capturer.class.getSuperclass(), info.capturer, "currentSession");
         manager =
                 (CameraManager)
-                        getPrivateProperty(Camera2Capturer.class, info.capturer, "cameraManager");
+                        getPrivateProperty(camera2CapturerClass(info.capturer), info.capturer, "cameraManager");
         captureSession =
                 (CameraCaptureSession)
                         getPrivateProperty(session.getClass(), session, "captureSession");
         cameraDevice =
                 (CameraDevice) getPrivateProperty(session.getClass(), session, "cameraDevice");
-        captureFormat =
-                (CameraEnumerationAndroid.CaptureFormat) getPrivateProperty(session.getClass(), session, "captureFormat");
-        fpsUnitFactor = (int) getPrivateProperty(session.getClass(), session, "fpsUnitFactor");
+        captureFpsRange = getCaptureFpsRange(session);
         surface = (Surface) getPrivateProperty(session.getClass(), session, "surface");
         cameraThreadHandler =
                 (Handler) getPrivateProperty(session.getClass(), session, "cameraThreadHandler");
@@ -497,15 +487,12 @@ public class CameraUtils {
                 isTorchOn ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
         captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                new Range<>(
-                        captureFormat.framerate.min / fpsUnitFactor,
-                        captureFormat.framerate.max / fpsUnitFactor));
+                captureFpsRange);
         captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
         captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
         captureRequestBuilder.addTarget(surface);
-        captureSession.setRepeatingRequest(
-                captureRequestBuilder.build(), null, cameraThreadHandler);
+        setRepeatingRequest(session, captureSession, captureRequestBuilder, cameraThreadHandler);
       } catch (CameraAccessException e) {
         // Should never happen since we are already accessing the camera
         throw new RuntimeException(e);
@@ -550,29 +537,27 @@ public class CameraUtils {
       resultError("setTorch", "Video capturer not found for id: " + trackId, result);
       return;
     }
-    if (info.capturer instanceof Camera2Capturer) {
+    if (isCamera2Capturer(info.capturer)) {
       CameraCaptureSession captureSession;
       CameraDevice cameraDevice;
-      CameraEnumerationAndroid.CaptureFormat captureFormat;
-      int fpsUnitFactor;
+      Object session;
+      Range<Integer> captureFpsRange;
       Surface surface;
       Handler cameraThreadHandler;
 
       try {
-        Object session =
+        session =
                 getPrivateProperty(
                         Camera2Capturer.class.getSuperclass(), info.capturer, "currentSession");
         CameraManager manager =
                 (CameraManager)
-                        getPrivateProperty(Camera2Capturer.class, info.capturer, "cameraManager");
+                        getPrivateProperty(camera2CapturerClass(info.capturer), info.capturer, "cameraManager");
         captureSession =
                 (CameraCaptureSession)
                         getPrivateProperty(session.getClass(), session, "captureSession");
         cameraDevice =
                 (CameraDevice) getPrivateProperty(session.getClass(), session, "cameraDevice");
-        captureFormat =
-                (CameraEnumerationAndroid.CaptureFormat) getPrivateProperty(session.getClass(), session, "captureFormat");
-        fpsUnitFactor = (int) getPrivateProperty(session.getClass(), session, "fpsUnitFactor");
+        captureFpsRange = getCaptureFpsRange(session);
         surface = (Surface) getPrivateProperty(session.getClass(), session, "surface");
         cameraThreadHandler =
                 (Handler) getPrivateProperty(session.getClass(), session, "cameraThreadHandler");
@@ -590,15 +575,12 @@ public class CameraUtils {
                 torch ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
         captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                new Range<>(
-                        captureFormat.framerate.min / fpsUnitFactor,
-                        captureFormat.framerate.max / fpsUnitFactor));
+                captureFpsRange);
         captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
         captureRequestBuilder.set(CaptureRequest.CONTROL_AE_LOCK, false);
         captureRequestBuilder.addTarget(surface);
-        captureSession.setRepeatingRequest(
-                captureRequestBuilder.build(), null, cameraThreadHandler);
+        setRepeatingRequest(session, captureSession, captureRequestBuilder, cameraThreadHandler);
       } catch (CameraAccessException e) {
         // Should never happen since we are already accessing the camera
         throw new RuntimeException(e);
@@ -634,6 +616,36 @@ public class CameraUtils {
     resultError("setTorch", "[TORCH] Video capturer not compatible", result);
   }
 
+
+  private static boolean isCamera2Capturer(VideoCapturer capturer) {
+    return capturer instanceof Camera2Capturer || capturer instanceof HighSpeedCamera2Capturer;
+  }
+
+  private static Class<?> camera2CapturerClass(VideoCapturer capturer) {
+    return capturer instanceof HighSpeedCamera2Capturer
+            ? HighSpeedCamera2Capturer.class : Camera2Capturer.class;
+  }
+
+  private Range<Integer> getCaptureFpsRange(Object session) throws NoSuchFieldWithNameException {
+    if (session instanceof HighSpeedCamera2Session) {
+      return ((HighSpeedCamera2Session) session).getCaptureFpsRange();
+    }
+    CameraEnumerationAndroid.CaptureFormat format =
+            (CameraEnumerationAndroid.CaptureFormat) getPrivateProperty(session.getClass(), session, "captureFormat");
+    int fpsUnitFactor = (int) getPrivateProperty(session.getClass(), session, "fpsUnitFactor");
+    return new Range<>(format.framerate.min / fpsUnitFactor, format.framerate.max / fpsUnitFactor);
+  }
+
+  private static void setRepeatingRequest(
+          Object session, CameraCaptureSession captureSession,
+          CaptureRequest.Builder requestBuilder, Handler cameraThreadHandler)
+          throws CameraAccessException {
+    if (session instanceof HighSpeedCamera2Session) {
+      ((HighSpeedCamera2Session) session).setRepeatingRequest(requestBuilder);
+    } else {
+      captureSession.setRepeatingRequest(requestBuilder.build(), null, cameraThreadHandler);
+    }
+  }
 
   private class NoSuchFieldWithNameException extends NoSuchFieldException {
 

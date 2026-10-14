@@ -1,7 +1,7 @@
 // Linux system-audio (loopback) capture for flutter_webrtc.
 //
 // Mirrors windows/application_loopback_capturer.cc but uses the PulseAudio
-// simple API to record the default sink's monitor source. Compiled only when
+// stream API to record the default sink's monitor source. Compiled only when
 // the plugin build found libpulse (HAVE_LIBPULSE, set in linux/CMakeLists.txt);
 // otherwise this translation unit is empty and CreateLoopbackCapturer falls
 // back to returning nullptr (getDisplayMedia continues without system audio),
@@ -17,10 +17,12 @@
 #include <pulse/error.h>
 #include <pulse/introspect.h>
 #include <pulse/mainloop.h>
-#include <pulse/simple.h>
+#include <pulse/stream.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
@@ -41,9 +43,8 @@ constexpr size_t kFrameBytes = kFramesPer10ms * kChannels * sizeof(int16_t);
 // ---------------------------------------------------------------------------
 // Introspection helpers.
 //
-// The pulse simple API cannot query which sink is default, so a short-lived
-// asynchronous context resolves it. Two callbacks fill in the results and set
-// a "done" flag that the pa_mainloop_iterate loop polls.
+// A short-lived context resolves the default sink. Callbacks fill the result
+// and update the pending operation count polled by pa_mainloop_iterate.
 // ---------------------------------------------------------------------------
 struct MonitorProbe {
   pa_mainloop* mainloop = nullptr;
@@ -206,7 +207,7 @@ std::string PulseLoopbackCapturer::ResolveDefaultMonitorSource() {
 
 bool PulseLoopbackCapturer::Start(scoped_refptr<RTCAudioSource> source) {
   if (running_) return true;
-
+  Stop();
   source_ = source;
 
   monitor_source_name_ = ResolveDefaultMonitorSource();
@@ -217,99 +218,143 @@ bool PulseLoopbackCapturer::Start(scoped_refptr<RTCAudioSource> source) {
     return false;
   }
 
+  mainloop_ = pa_mainloop_new();
+  if (!mainloop_) {
+    Stop();
+    return false;
+  }
+  context_ = pa_context_new(pa_mainloop_get_api(mainloop_), "flutter_webrtc");
+  if (!context_ ||
+      pa_context_connect(context_, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+    Stop();
+    return false;
+  }
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (pa_context_get_state(context_) != PA_CONTEXT_READY) {
+    if (!PA_CONTEXT_IS_GOOD(pa_context_get_state(context_)) ||
+        std::chrono::steady_clock::now() >= deadline ||
+        pa_mainloop_iterate(mainloop_, /*block=*/0, nullptr) < 0) {
+      Stop();
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
   const pa_sample_spec ss = {
       /*format=*/PA_SAMPLE_S16LE,
       /*rate=*/kSampleRate,
       /*channels=*/static_cast<uint8_t>(kChannels),
   };
-
-  // Ask pulse for ~10 ms fragments so pa_simple_read returns one frame at a
-  // time, giving a natural 100 Hz cadence. -1 leaves other attributes at the
-  // server default.
-  pa_buffer_attr attr;
-  attr.maxlength = static_cast<uint32_t>(-1);
-  attr.tlength   = static_cast<uint32_t>(-1);
-  attr.prebuf    = static_cast<uint32_t>(-1);
-  attr.minreq    = static_cast<uint32_t>(-1);
-  attr.fragsize  = static_cast<uint32_t>(kFrameBytes);
-
-  int error = 0;
-  simple_ = pa_simple_new(
-      /*server=*/nullptr,
-      /*name=*/"flutter_webrtc",
-      /*dir=*/PA_STREAM_RECORD,
-      /*dev=*/monitor_source_name_.c_str(),  // capture the sink's monitor
-      /*stream_name=*/"System audio loopback",
-      &ss,
-      /*map=*/nullptr,
-      &attr,
-      &error);
-
-  if (!simple_) {
-    std::cerr << "[LoopbackCapturer] pa_simple_new failed on '"
-              << monitor_source_name_ << "': " << pa_strerror(error) << "\n";
-    source_ = nullptr;
+  const pa_buffer_attr attr = {
+      /*maxlength=*/static_cast<uint32_t>(-1),
+      /*tlength=*/static_cast<uint32_t>(-1),
+      /*prebuf=*/static_cast<uint32_t>(-1),
+      /*minreq=*/static_cast<uint32_t>(-1),
+      /*fragsize=*/static_cast<uint32_t>(kFrameBytes),
+  };
+  stream_ = pa_stream_new(context_, "System audio loopback", &ss, nullptr);
+  if (!stream_ || pa_stream_connect_record(stream_, monitor_source_name_.c_str(),
+                                           &attr, PA_STREAM_NOFLAGS) < 0) {
+    Stop();
     return false;
+  }
+
+  while (pa_stream_get_state(stream_) != PA_STREAM_READY) {
+    if (!PA_CONTEXT_IS_GOOD(pa_context_get_state(context_)) ||
+        !PA_STREAM_IS_GOOD(pa_stream_get_state(stream_)) ||
+        std::chrono::steady_clock::now() >= deadline ||
+        pa_mainloop_iterate(mainloop_, /*block=*/0, nullptr) < 0) {
+      Stop();
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 
   running_ = true;
   capture_thread_ = std::thread(&PulseLoopbackCapturer::CaptureThread, this);
-  // std::cout << "[LoopbackCapturer] Capturing monitor '"
-  //           << monitor_source_name_ << "' (" << kSampleRate << " Hz, "
-  //           << kChannels << " ch, s16le).\n";
   return true;
 }
 
 void PulseLoopbackCapturer::Stop() {
-  if (!running_) return;
   running_ = false;
-
-  // The capture thread may be blocked inside pa_simple_read. A default-sink
-  // monitor delivers frames continuously (silence included) while any sink is
-  // running, so the read returns within ~10 ms and the join completes
-  // promptly. KNOWN CAVEAT: if the sink is fully suspended (no stream playing
-  // and module-suspend-on-idle has parked it) the monitor may stop producing
-  // data and pa_simple_read can block until playback resumes. The simple API
-  // exposes no cancel; a PipeWire-native or async pa_stream backend would let
-  // us unblock explicitly. Documented, not mitigated here.
   if (capture_thread_.joinable()) {
     capture_thread_.join();
   }
-
-  if (simple_) {
-    pa_simple_free(simple_);
-    simple_ = nullptr;
+  if (stream_) {
+    pa_stream_disconnect(stream_);
+    pa_stream_unref(stream_);
+    stream_ = nullptr;
+  }
+  if (context_) {
+    pa_context_disconnect(context_);
+    pa_context_unref(context_);
+    context_ = nullptr;
+  }
+  if (mainloop_) {
+    pa_mainloop_free(mainloop_);
+    mainloop_ = nullptr;
   }
   source_ = nullptr;
-  // std::cout << "[LoopbackCapturer] Capture stopped.\n";
 }
 
-// ---------------------------------------------------------------------------
-// CaptureThread
-// Blocking pa_simple_read paces the loop: each read returns exactly one 10 ms
-// stereo s16 frame at real time, which is fed straight to CaptureFrame with no
-// intermediate ring buffer (unlike the Windows path). No sample-format
-// conversion is needed because pulse resamples/converts to the requested
-// S16LE / 48 kHz / stereo spec server-side.
-// ---------------------------------------------------------------------------
 void PulseLoopbackCapturer::CaptureThread() {
-  std::vector<int16_t> buf(kFramesPer10ms * kChannels, int16_t{0});
+  std::vector<int16_t> frame(kFramesPer10ms * kChannels);
+  size_t buffered = 0;
 
   while (running_) {
-    int error = 0;
-    if (pa_simple_read(simple_, buf.data(), kFrameBytes, &error) < 0) {
-      // Device gone / server disconnect / read error: stop gracefully.
-      std::cerr << "[LoopbackCapturer] pa_simple_read error: "
-                << pa_strerror(error) << " -- stopping capture.\n";
+    if (pa_mainloop_iterate(mainloop_, /*block=*/0, nullptr) < 0 ||
+        pa_context_get_state(context_) != PA_CONTEXT_READY ||
+        pa_stream_get_state(stream_) != PA_STREAM_READY) {
       break;
     }
-    if (!running_) break;
 
-    if (source_) {
-      source_->CaptureFrame(buf.data(), kBitsPerSample, kSampleRate, kChannels,
-                            kFramesPer10ms);
+    while (running_) {
+      const size_t readable = pa_stream_readable_size(stream_);
+      if (readable == static_cast<size_t>(-1)) {
+        running_ = false;
+        break;
+      }
+      if (readable == 0) break;
+
+      const void* data = nullptr;
+      size_t length = 0;
+      if (pa_stream_peek(stream_, &data, &length) < 0) {
+        running_ = false;
+        break;
+      }
+      if (length == 0) break;
+
+      size_t offset = 0;
+      while (offset < length && running_) {
+        const size_t bytes = std::min(kFrameBytes - buffered, length - offset);
+        auto* destination = reinterpret_cast<uint8_t*>(frame.data()) + buffered;
+        if (data) {
+          std::memcpy(destination, static_cast<const uint8_t*>(data) + offset,
+                      bytes);
+        } else {
+          std::memset(destination, 0, bytes);
+        }
+        offset += bytes;
+        buffered += bytes;
+        if (buffered == kFrameBytes) {
+          if (source_ && running_) {
+            source_->CaptureFrame(frame.data(), kBitsPerSample, kSampleRate,
+                                  kChannels, kFramesPer10ms);
+          }
+          buffered = 0;
+        }
+      }
+      if (pa_stream_drop(stream_) < 0) {
+        running_ = false;
+        break;
+      }
     }
+    // Nonblocking polling keeps Stop responsive even when the sink suspends.
+    if (running_) std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
+  running_ = false;
 }
 
 }  // namespace flutter_webrtc_plugin

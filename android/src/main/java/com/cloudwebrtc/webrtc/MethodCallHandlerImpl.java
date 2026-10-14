@@ -1753,10 +1753,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     }
     final String trackId = track.id();
     executor.execute(() -> {
+      PeerConnectionObserver observer = mPeerConnectionObservers.get(peerConnectionId);
+      if (observer == null || observer.getPeerConnection() == null) {
+        return;
+      }
+      MediaStreamTrack currentTrack = observer.getRemoteTrack(trackId);
+      if (!(currentTrack instanceof VideoTrack) || currentTrack != track) {
+        return;
+      }
       for (int i = 0; i < renders.size(); i++) {
         FlutterRTCVideoRenderer renderer = renders.valueAt(i);
         if (renderer.checkVideoTrack(trackId, peerConnectionId)) {
-          renderer.setTrack((VideoTrack) track, streamId, peerConnectionId);
+          renderer.setTrack((VideoTrack) currentTrack, streamId, peerConnectionId);
         }
       }
     });

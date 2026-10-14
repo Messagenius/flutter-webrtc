@@ -38,7 +38,19 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
 
   void RemoveStreamForId(const std::string& id);
 
+  void Close();
+  void Dispose();
+
  private:
+  friend class FlutterPeerConnection;
+
+  struct OperationState {
+    std::mutex mutex;
+    bool closed = false;
+  };
+
+  std::shared_ptr<OperationState> operations_ =
+      std::make_shared<OperationState>();
   std::unique_ptr<EventChannelProxy> event_channel_;
   scoped_refptr<RTCPeerConnection> peerconnection_;
   std::map<std::string, scoped_refptr<RTCMediaStream>> remote_streams_;
@@ -194,6 +206,9 @@ class FlutterPeerConnection {
                    std::unique_ptr<MethodResultProxy> result);
 
  private:
+  std::shared_ptr<FlutterPeerConnectionObserver> ObserverForPeer(
+      RTCPeerConnection* pc);
+
   FlutterWebRTCBase* base_;
 };
 

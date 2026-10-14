@@ -165,8 +165,14 @@ NSArray<RTCDesktopSource*>* _captureSources;
                                           }];
     } else {
       NSLog(@"ScreenCaptureKit unavailable or unsupported, falling back to RTCDesktopCapturer");
-      desktopCapturer = [[RTCDesktopCapturer alloc] initWithDefaultScreen:self
+      if (source != nil) {
+        desktopCapturer = [[RTCDesktopCapturer alloc] initWithSource:source
+                                                          delegate:self
+                                                   captureDelegate:videoProcessingAdapter];
+      } else {
+        desktopCapturer = [[RTCDesktopCapturer alloc] initWithDefaultScreen:self
                                                           captureDelegate:videoProcessingAdapter];
+      }
     }
   }
 

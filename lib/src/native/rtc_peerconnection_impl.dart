@@ -29,6 +29,7 @@ class RTCPeerConnectionNative extends RTCPeerConnection {
   final _localStreams = <MediaStream>[];
   final _remoteStreams = <MediaStream>[];
   final _dataChannels = <RTCDataChannelNative>[];
+  Future<void>? _disposeFuture;
   Map<String, dynamic> _configuration;
   RTCSignalingState? _signalingState;
   RTCIceGatheringState? _iceGatheringState;
@@ -300,7 +301,9 @@ class RTCPeerConnectionNative extends RTCPeerConnection {
   }
 
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() => _disposeFuture ??= Future<void>.microtask(_dispose);
+
+  Future<void> _dispose() async {
     // Channels first, while the platform can still find them through this
     // connection. Drain rather than iterate: a channel can arrive during an
     // awaited close() and must be closed too, not trip the iterator.

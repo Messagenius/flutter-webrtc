@@ -29,7 +29,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 
 /** A WebRTC CameraSession using Android's constrained high-speed Camera2 path. */
-final class HighSpeedCamera2Session implements CameraSession {
+public final class HighSpeedCamera2Session implements CameraSession {
   private static final String TAG = "HighSpeedCamera2";
 
   private enum SessionState {
@@ -57,6 +57,7 @@ final class HighSpeedCamera2Session implements CameraSession {
   @Nullable private Surface surface;
   @Nullable private CameraCaptureSession captureSession;
   @Nullable private HandlerThread captureCallbackThread;
+  @Nullable private Handler captureCallbackHandler;
   private SessionState state = SessionState.RUNNING;
   private boolean firstFrameReported;
 
@@ -251,8 +252,6 @@ final class HighSpeedCamera2Session implements CameraSession {
         chooseFocusMode(requestBuilder);
         requestBuilder.addTarget(surface);
 
-        CameraConstrainedHighSpeedCaptureSession highSpeedSession =
-            (CameraConstrainedHighSpeedCaptureSession) session;
         HighSpeedCamera2Capturer.beginDiagnostics(
             cameraId,
             captureSize.getWidth(),
@@ -262,11 +261,8 @@ final class HighSpeedCamera2Session implements CameraSession {
         // cannot starve texture consumption and create camera backpressure.
         captureCallbackThread = new HandlerThread("HighSpeedCameraResults");
         captureCallbackThread.start();
-        Handler captureCallbackHandler = new Handler(captureCallbackThread.getLooper());
-        highSpeedSession.setRepeatingBurst(
-            highSpeedSession.createHighSpeedRequestList(requestBuilder.build()),
-            new CameraCaptureCallback(),
-            captureCallbackHandler);
+        captureCallbackHandler = new Handler(captureCallbackThread.getLooper());
+        setRepeatingRequest(requestBuilder);
       } catch (CameraAccessException | IllegalArgumentException | IllegalStateException error) {
         reportError("Failed to start high-speed request burst: " + error);
         return;
@@ -297,6 +293,21 @@ final class HighSpeedCamera2Session implements CameraSession {
       Logging.d(TAG, "Constrained high-speed camera started successfully");
       callback.onDone(HighSpeedCamera2Session.this);
     }
+  }
+
+  public Range<Integer> getCaptureFpsRange() {
+    return captureFpsRange;
+  }
+
+  public void setRepeatingRequest(CaptureRequest.Builder requestBuilder)
+      throws CameraAccessException {
+    requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, captureFpsRange);
+    CameraConstrainedHighSpeedCaptureSession highSpeedSession =
+        (CameraConstrainedHighSpeedCaptureSession) captureSession;
+    highSpeedSession.setRepeatingBurst(
+        highSpeedSession.createHighSpeedRequestList(requestBuilder.build()),
+        new CameraCaptureCallback(),
+        captureCallbackHandler);
   }
 
   private void chooseFocusMode(CaptureRequest.Builder requestBuilder) {
@@ -351,6 +362,7 @@ final class HighSpeedCamera2Session implements CameraSession {
     if (captureCallbackThread != null) {
       captureCallbackThread.quitSafely();
       captureCallbackThread = null;
+      captureCallbackHandler = null;
     }
     if (surface != null) {
       surface.release();

@@ -397,7 +397,12 @@ void FlutterPeerConnection::RTCPeerConnectionClose(
     std::unique_ptr<MethodResultProxy> result) {
   auto it2 = base_->peerconnections_.find(uuid);
   if (it2 != base_->peerconnections_.end()) {
-    it2->second->Close();
+    auto observer = base_->peerconnection_observers_.find(uuid);
+    if (observer != base_->peerconnection_observers_.end()) {
+      observer->second->Close();
+    } else {
+      it2->second->Close();
+    }
     base_->peerconnections_.erase(it2);
   }
 
@@ -405,19 +410,15 @@ void FlutterPeerConnection::RTCPeerConnectionClose(
 }
 
 void FlutterPeerConnection::RTCPeerConnectionDispose(
-    RTCPeerConnection* pc,
+    RTCPeerConnection*,
     const std::string& uuid,
     std::unique_ptr<MethodResultProxy> result) {
   auto it = base_->peerconnection_observers_.find(uuid);
   if (it != base_->peerconnection_observers_.end()) {
-    // Close() can still deliver OnRemoveStream callbacks. Keep the observer
-    // alive until native teardown completes, then detach it before deletion.
-    pc->Close();
-    pc->DeRegisterRTCPeerConnectionObserver();
+    it->second->Dispose();
     base_->peerconnection_observers_.erase(it);
   }
-
-  // Leave the connection map entry for a subsequent peerConnectionClose call.
+  base_->peerconnections_.erase(uuid);
   result->Success();
 }
 
@@ -637,6 +638,16 @@ RTCMediaType stringToMediaType(const std::string& mediaType) {
   return type;
 }
 
+std::shared_ptr<FlutterPeerConnectionObserver>
+FlutterPeerConnection::ObserverForPeer(RTCPeerConnection* pc) {
+  for (const auto& entry : base_->peerconnection_observers_) {
+    if (entry.second->peerconnection_.get() == pc) {
+      return entry.second;
+    }
+  }
+  return nullptr;
+}
+
 void FlutterPeerConnection::AddTransceiver(
     RTCPeerConnection* pc,
     const std::string& trackId,
@@ -660,7 +671,19 @@ void FlutterPeerConnection::AddTransceiver(
 
   // The actual libwebrtc call + result completion. pc->AddTransceiver() is a
   // proxy that BLOCKS the caller until the signaling thread finishes it.
-  auto do_add = [pc, track, type, has_init, init, result_ptr]() {
+  auto observer = ObserverForPeer(pc);
+  if (!observer) {
+    result_ptr->Error("AddTransceiver", "PeerConnection is closed");
+    return;
+  }
+  auto operations = observer->operations_;
+  scoped_refptr<RTCPeerConnection> peer(pc);
+  auto do_add = [pc = peer, operations, track, type, has_init, init, result_ptr]() {
+    std::lock_guard<std::mutex> lock(operations->mutex);
+    if (operations->closed) {
+      result_ptr->Error("AddTransceiver", "PeerConnection is closed");
+      return;
+    }
     if (has_init) {
       auto transceiver = track.get() != nullptr
                              ? pc->AddTransceiver(track.get(), init)
@@ -693,7 +716,6 @@ void FlutterPeerConnection::AddTransceiver(
   // (house style, see CreateOffer). The proxy is thread-safe (it marshals to the
   // signaling thread regardless of caller), and LiveKit awaits this result
   // before it negotiates (createOffer/setLocalDescription), so ordering holds.
-  // pc outlives the in-flight publish (Dart awaits this before any teardown).
   std::thread(std::move(do_add)).detach();
 #else
   do_add();
@@ -1181,7 +1203,19 @@ void FlutterPeerConnection::AddTrack(
   // The actual libwebrtc call + result completion. pc->AddTrack() is a proxy
   // that BLOCKS the caller until the signaling thread finishes it (which, for a
   // first audio track, includes the cold RTP-sender/encoder/APM init).
-  auto do_add = [pc, track, streamIds, result_ptr]() {
+  auto observer = ObserverForPeer(pc);
+  if (!observer) {
+    result_ptr->Error("AddTrack", "PeerConnection is closed");
+    return;
+  }
+  auto operations = observer->operations_;
+  scoped_refptr<RTCPeerConnection> peer(pc);
+  auto do_add = [pc = peer, operations, track, streamIds, result_ptr]() {
+    std::lock_guard<std::mutex> lock(operations->mutex);
+    if (operations->closed) {
+      result_ptr->Error("AddTrack", "PeerConnection is closed");
+      return;
+    }
     std::string kind = track->kind().std_string();
     if (0 == kind.compare("audio")) {
       auto sender =
@@ -1242,6 +1276,19 @@ FlutterPeerConnectionObserver::FlutterPeerConnectionObserver(
   peerconnection->RegisterRTCPeerConnectionObserver(this);
 }
 
+
+void FlutterPeerConnectionObserver::Close() {
+  std::lock_guard<std::mutex> lock(operations_->mutex);
+  if (operations_->closed) return;
+  operations_->closed = true;
+  peerconnection_->Close();
+}
+
+void FlutterPeerConnectionObserver::Dispose() {
+  // Close can deliver callbacks, so detach only after native teardown returns.
+  Close();
+  peerconnection_->DeRegisterRTCPeerConnectionObserver();
+}
 
 void FlutterPeerConnectionObserver::OnSignalingState(RTCSignalingState state) {
   EncodableMap params;

@@ -68,6 +68,58 @@ void main() {
     expect(calls, isNot(contains('dataChannelSend')));
   });
 
+  test('reentrant close shares completion and notifies closed once', () async {
+    final dataChannel = RTCDataChannelNative(
+        peerConnectionId, 'label', 1, flutterId,
+        state: RTCDataChannelState.RTCDataChannelOpen);
+    final streamStates = <RTCDataChannelState>[];
+    dataChannel.stateChangeStream.listen(streamStates.add);
+    var notifications = 0;
+    Future<void>? reentrantClose;
+    dataChannel.onDataChannelState = (_) {
+      notifications++;
+      reentrantClose = dataChannel.close();
+    };
+
+    final closing = dataChannel.close();
+    expect(dataChannel.state, RTCDataChannelState.RTCDataChannelClosed);
+    await expectLater(dataChannel.send(RTCDataChannelMessage('late')),
+        throwsA(isA<Exception>()));
+    await closing;
+
+    expect(identical(closing, reentrantClose), isTrue);
+    expect(notifications, 1);
+    expect(streamStates, [RTCDataChannelState.RTCDataChannelClosed]);
+    expect(calls.where((call) => call == 'dataChannelClose'), hasLength(1));
+    expect(calls, isNot(contains('dataChannelSend')));
+  });
+
+  test('closing inside a synchronous stream listener still tears down',
+      () async {
+    final dataChannel = RTCDataChannelNative(
+        peerConnectionId, 'label', 1, flutterId,
+        state: RTCDataChannelState.RTCDataChannelConnecting);
+    final streamStates = <RTCDataChannelState>[];
+    Future<void>? closing;
+    dataChannel.stateChangeStream.listen((state) {
+      streamStates.add(state);
+      closing ??= dataChannel.close();
+    });
+
+    dataChannel.eventListener(<String, dynamic>{
+      'event': 'dataChannelStateChanged',
+      'id': 1,
+      'state': 'open',
+    });
+    await closing;
+
+    expect(streamStates, [
+      RTCDataChannelState.RTCDataChannelOpen,
+      RTCDataChannelState.RTCDataChannelClosed,
+    ]);
+    expect(calls.where((call) => call == 'dataChannelClose'), hasLength(1));
+  });
+
   test(
       'close() notifies stateChangeStream listeners and onDataChannelState of the closed state',
       () async {
