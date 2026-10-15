@@ -1,4 +1,5 @@
 #include "flutter_webrtc_base.h"
+#include "flutter_ice_servers.h"
 
 #include "flutter_data_channel.h"
 #include "flutter_peerconnection.h"
@@ -262,51 +263,6 @@ scoped_refptr<RTCMediaConstraints> FlutterWebRTCBase::ParseMediaConstraints(
   return media_constraints;
 }
 
-bool FlutterWebRTCBase::CreateIceServers(const EncodableList& iceServersArray,
-                                         IceServer* ice_servers) {
-  size_t size = iceServersArray.size();
-  for (size_t i = 0; i < size; i++) {
-    IceServer& ice_server = ice_servers[i];
-    EncodableMap iceServerMap = GetValue<EncodableMap>(iceServersArray[i]);
-
-    if (iceServerMap.find(EncodableValue("username")) != iceServerMap.end()) {
-      ice_server.username = GetValue<std::string>(
-          iceServerMap.find(EncodableValue("username"))->second);
-    }
-    if (iceServerMap.find(EncodableValue("credential")) != iceServerMap.end()) {
-      ice_server.password = GetValue<std::string>(
-          iceServerMap.find(EncodableValue("credential"))->second);
-    }
-
-    auto it = iceServerMap.find(EncodableValue("url"));
-    if (it != iceServerMap.end() && TypeIs<std::string>(it->second)) {
-      ice_server.uri = GetValue<std::string>(it->second);
-    }
-    it = iceServerMap.find(EncodableValue("urls"));
-    if (it != iceServerMap.end()) {
-      if (TypeIs<std::string>(it->second)) {
-        ice_server.uri = GetValue<std::string>(it->second);
-      }
-      if (TypeIs<EncodableList>(it->second)) {
-        const EncodableList urls = GetValue<EncodableList>(it->second);
-        for (auto url : urls) {
-          if (TypeIs<EncodableMap>(url)) {
-            const EncodableMap map = GetValue<EncodableMap>(url);
-            std::string value;
-            auto it2 = map.find(EncodableValue("url"));
-            if (it2 != map.end()) {
-              ice_server.uri = GetValue<std::string>(it2->second);
-            }
-          } else if (TypeIs<std::string>(url)) {
-            ice_server.uri = GetValue<std::string>(url);
-          }
-        }
-      }
-    }
-  }
-  return size > 0;
-}
-
 bool FlutterWebRTCBase::ParseRTCConfiguration(const EncodableMap& map,
                                               RTCConfiguration& conf) {
   // Enable SNAP (SCTP INIT in SDP), part of WARP.
@@ -316,10 +272,9 @@ bool FlutterWebRTCBase::ParseRTCConfiguration(const EncodableMap& map,
   }
 
   auto it = map.find(EncodableValue("iceServers"));
-  if (it != map.end()) {
-    const EncodableList iceServersArray = GetValue<EncodableList>(it->second);
-    CreateIceServers(iceServersArray, conf.ice_servers);
-  }
+  const EncodableList iceServersArray =
+      it != map.end() ? GetValue<EncodableList>(it->second) : EncodableList{};
+  ParseIceServers(iceServersArray, conf.ice_servers);
   // iceTransportPolicy (public API)
   it = map.find(EncodableValue("iceTransportPolicy"));
   if (it != map.end() && TypeIs<std::string>(it->second)) {

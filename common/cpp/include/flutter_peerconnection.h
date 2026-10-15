@@ -138,9 +138,10 @@ class FlutterPeerConnection {
                           std::string transceiverId,
                           std::unique_ptr<MethodResultProxy> result);
 
-  void RtpTransceiverGetCurrentDirection(
+  void RtpTransceiverGetDirection(
       RTCPeerConnection* pc,
       std::string transceiverId,
+      bool current_direction,
       std::unique_ptr<MethodResultProxy> result);
 
   void SetConfiguration(RTCPeerConnection* pc,

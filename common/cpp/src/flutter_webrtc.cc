@@ -935,8 +935,9 @@ void FlutterWebRTC::HandleMethodCall(
     }
 
     RtpTransceiverStop(pc, transceiverId, std::move(result));
-  } else if (method_call.method_name().compare(
-                 "rtpTransceiverGetCurrentDirection") == 0) {
+  } else if (method_call.method_name() == "rtpTransceiverGetDirection" ||
+             method_call.method_name() == "rtpTransceiverGetCurrentDirection") {
+    const std::string method = method_call.method_name();
     if (!method_call.arguments()) {
       result->Error("Bad Arguments", "Null constraints arguments received");
       return;
@@ -947,21 +948,19 @@ void FlutterWebRTC::HandleMethodCall(
 
     RTCPeerConnection* pc = PeerConnectionForId(peerConnectionId);
     if (pc == nullptr) {
-      result->Error(
-          "rtpTransceiverGetCurrentDirection",
-          "rtpTransceiverGetCurrentDirection() peerConnection is null");
+      result->Error(method, method + "() peerConnection is null");
       return;
     }
 
     const std::string transceiverId = findString(params, "transceiverId");
     if (transceiverId.empty()) {
-      result->Error("rtpTransceiverGetCurrentDirection",
-                    "rtpTransceiverGetCurrentDirection() transceiverId is "
-                    "null or empty");
+      result->Error(method, method + "() transceiverId is null or empty");
       return;
     }
 
-    RtpTransceiverGetCurrentDirection(pc, transceiverId, std::move(result));
+    RtpTransceiverGetDirection(
+        pc, transceiverId, method == "rtpTransceiverGetCurrentDirection",
+        std::move(result));
   } else if (method_call.method_name().compare("rtpTransceiverSetDirection") ==
              0) {
     if (!method_call.arguments()) {

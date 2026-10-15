@@ -113,9 +113,6 @@ class FlutterWebRTCBase {
                         scoped_refptr<RTCMediaConstraints> mediaConstraints,
                         ParseConstraintType type = kMandatory);
 
-  bool CreateIceServers(const EncodableList& iceServersArray,
-                        IceServer* ice_servers);
-
  protected:
   bool webrtc_initialized_ = false;
   // Whether `enableWARP` was requested; peer connections created afterwards
