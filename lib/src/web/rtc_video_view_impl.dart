@@ -35,6 +35,10 @@ class RTCVideoView extends StatefulWidget {
 class RTCVideoViewState extends State<RTCVideoView> {
   RTCVideoViewState();
 
+  // Firefox uploads video to WebGL without the stream rotation (e.g. portrait
+  // mobile cameras), so the frame is copied through a 2D canvas, which applies it.
+  web.OffscreenCanvas? _frameCanvas;
+
   RTCVideoRenderer get videoRenderer => widget._renderer;
 
   @override
@@ -97,10 +101,13 @@ class RTCVideoViewState extends State<RTCVideoView> {
     if (lastFrameTime != element.currentTime) {
       lastFrameTime = element.currentTime;
       try {
-        final ui.Image img = await ui_web.createImageFromTextureSource(element,
-            width: element.videoWidth,
-            height: element.videoHeight,
-            transferOwnership: true);
+        final ui.Image img = ui_web.browser.isFirefox
+            ? await ui_web
+                .createImageFromImageBitmap(_drawRotatedFrame(element))
+            : await ui_web.createImageFromTextureSource(element,
+                width: element.videoWidth,
+                height: element.videoHeight,
+                transferOwnership: true);
 
         if (mounted) {
           setState(() {
@@ -117,6 +124,18 @@ class RTCVideoViewState extends State<RTCVideoView> {
         }
       }
     }
+  }
+
+  web.ImageBitmap _drawRotatedFrame(web.HTMLVideoElement element) {
+    final canvas = _frameCanvas ??= web.OffscreenCanvas(0, 0);
+    if (canvas.width != element.videoWidth ||
+        canvas.height != element.videoHeight) {
+      canvas.width = element.videoWidth;
+      canvas.height = element.videoHeight;
+    }
+    (canvas.getContext('2d') as web.OffscreenCanvasRenderingContext2D)
+        .drawImage(element, 0, 0);
+    return canvas.transferToImageBitmap();
   }
 
   @override
