@@ -85,6 +85,12 @@ public class AudioSwitchManager {
     private boolean manageAudioFocus = true;
 
     /**
+     * Messagenius fork: start() was called and stop() not yet. Survives a hand-off so the
+     * session can resume. Only touched on the handler thread.
+     */
+    private boolean sessionRequested = false;
+
+    /**
      * The audio focus mode to use while started.
      * <br />
      * Defaults to AudioManager.AUDIOFOCUS_GAIN.
@@ -188,32 +194,68 @@ public class AudioSwitchManager {
     }
 
     public void start() {
-        if (!audioSessionManagementEnabled) {
-            return;
-        }
         handler.post(() -> {
-            AudioSwitch audioSwitch = getOrCreateAudioSwitch();
-            if (audioSwitch != null && !isActive) {
-                audioSwitch.activate();
-                isActive = true;
-                applyDesiredAudioOutput(audioSwitch);
-            }
+            sessionRequested = true;
+            activate();
         });
     }
 
     public void stop() {
-        if (audioSwitch != null) {
-            handler.post(() -> {
-                if (isActive) {
-                    Objects.requireNonNull(audioSwitch).deactivate();
-                    isActive = false;
-                }
-            });
+        handler.post(() -> {
+            sessionRequested = false;
+            deactivate();
+        });
+    }
+
+    // Must be called on the handler thread.
+    private void activate() {
+        AudioSwitch audioSwitch = getOrCreateAudioSwitch();
+        if (audioSwitch != null && !isActive) {
+            audioSwitch.activate();
+            isActive = true;
+            applyDesiredAudioOutput(audioSwitch);
+        }
+    }
+
+    // Must be called on the handler thread.
+    private void deactivate() {
+        if (isActive) {
+            Objects.requireNonNull(audioSwitch).deactivate();
+            isActive = false;
         }
     }
 
     public static void setAudioSessionManagementEnabled(boolean enabled) {
         audioSessionManagementEnabled = enabled;
+    }
+
+    /**
+     * Messagenius fork: hands audio mode, focus and routing over to someone else (e.g. Telecom).
+     * A session the call asked for stays requested so {@link #endHandOff(boolean)} can resume it.
+     */
+    public void beginHandOff() {
+        handler.post(() -> {
+            audioSessionManagementEnabled = false;
+            deactivate();
+        });
+    }
+
+    /**
+     * Messagenius fork: takes audio mode, focus and routing back. With [resume] the session the
+     * call still asks for starts again; otherwise that request is dropped (the call is over).
+     */
+    public void endHandOff(boolean resume) {
+        handler.post(() -> {
+            if (audioSessionManagementEnabled) {
+                return;
+            }
+            audioSessionManagementEnabled = true;
+            if (!resume) {
+                sessionRequested = false;
+            } else if (sessionRequested) {
+                activate();
+            }
+        });
     }
 
     public void setMicrophoneMute(boolean mute) {
