@@ -325,7 +325,8 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     }
   } else if ([constraint isKindOfClass:[NSDictionary class]]) {
     id idealConstraint = constraint[@"ideal"];
-    if ([idealConstraint isKindOfClass:[NSString class]]) {
+    if ([idealConstraint isKindOfClass:[NSString class]] ||
+        [idealConstraint isKindOfClass:[NSNumber class]]) {
       int possibleValue = [idealConstraint intValue];
       if (possibleValue != 0) {
         return possibleValue;

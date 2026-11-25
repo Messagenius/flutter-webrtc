@@ -715,7 +715,7 @@ public class GetUserMediaImpl {
 
         if (constraintsMap.getType(key) == ObjectType.Map) {
             ConstraintsMap innerMap = constraintsMap.getMap(key);
-            if (constraintsMap.getType("ideal") == ObjectType.Number) {
+            if (innerMap.getType("ideal") == ObjectType.Number) {
                 return innerMap.getInt("ideal");
             }
         }
