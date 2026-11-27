@@ -150,6 +150,7 @@ class Helper {
   /// automatic microphone selection for future `getUserMedia` calls.
   static void clearPreferredAudioInput() {
     PreferredDevices.audioInputId = null;
+    NativeAudioManagement.clearPreferredAudioInput().ignore();
   }
 
   /// Set the preferred camera for future `getUserMedia` calls that don't

@@ -12,9 +12,10 @@
 #import <os/lock.h>
 
 @implementation FlutterRTCVideoRenderer {
-  CGSize _frameSize;
   CGSize _renderSize;
   CVPixelBufferRef _pixelBufferRef;
+  CVPixelBufferPoolRef _pixelBufferPool;
+  CGSize _poolSize;
   RTCVideoRotation _rotation;
   FlutterEventChannel* _eventChannel;
   bool _isFirstFrameRendered;
@@ -34,11 +35,12 @@
     _lock = OS_UNFAIR_LOCK_INIT;
     _isFirstFrameRendered = false;
     _frameAvailable = false;
-    _frameSize = CGSizeZero;
     _renderSize = CGSizeZero;
     _rotation = -1;
     _registry = registry;
     _pixelBufferRef = nil;
+    _pixelBufferPool = NULL;
+    _poolSize = CGSizeZero;
     _eventSink = nil;
     _rotation = -1;
     _textureId = [registry registerTexture:self];
@@ -72,21 +74,29 @@
     CVBufferRelease(_pixelBufferRef);
     _pixelBufferRef = nil;
   }
+  CVPixelBufferPoolRelease(_pixelBufferPool);
+  _pixelBufferPool = NULL;
   _frameAvailable = false;
   os_unfair_lock_unlock(&_lock);
 }
 
+- (RTCVideoTrack*)videoTrack {
+  os_unfair_lock_lock(&_lock);
+  RTCVideoTrack* videoTrack = _videoTrack;
+  os_unfair_lock_unlock(&_lock);
+  return videoTrack;
+}
+
 - (void)setVideoTrack:(RTCVideoTrack*)videoTrack {
-  RTCVideoTrack* oldValue = self.videoTrack;
+  os_unfair_lock_lock(&_lock);
+  RTCVideoTrack* oldValue = _videoTrack;
+  _videoTrack = videoTrack;
+  os_unfair_lock_unlock(&_lock);
   if (oldValue != videoTrack) {
-    os_unfair_lock_lock(&_lock);
-    _videoTrack = videoTrack;
-    os_unfair_lock_unlock(&_lock);
     _isFirstFrameRendered = false;
     if (oldValue) {
       [oldValue removeRenderer:self];
     }
-    _frameSize = CGSizeZero;
     _renderSize = CGSizeZero;
     _rotation = -1;
     if (videoTrack) {
@@ -95,43 +105,9 @@
   }
 }
 
-- (id<RTCI420Buffer>)correctRotation:(const id<RTCI420Buffer>)src
-                        withRotation:(RTCVideoRotation)rotation {
-  int rotated_width = src.width;
-  int rotated_height = src.height;
-
-  if (rotation == RTCVideoRotation_90 || rotation == RTCVideoRotation_270) {
-    int temp = rotated_width;
-    rotated_width = rotated_height;
-    rotated_height = temp;
-  }
-
-  id<RTCI420Buffer> buffer = [[RTCI420Buffer alloc] initWithWidth:rotated_width
-                                                           height:rotated_height];
-
-  [RTCYUVHelper I420Rotate:src.dataY
-                srcStrideY:src.strideY
-                      srcU:src.dataU
-                srcStrideU:src.strideU
-                      srcV:src.dataV
-                srcStrideV:src.strideV
-                      dstY:(uint8_t*)buffer.dataY
-                dstStrideY:buffer.strideY
-                      dstU:(uint8_t*)buffer.dataU
-                dstStrideU:buffer.strideU
-                      dstV:(uint8_t*)buffer.dataV
-                dstStrideV:buffer.strideV
-                     width:src.width
-                    height:src.height
-                      mode:rotation];
-
-  return buffer;
-}
-
 - (void)copyI420ToCVPixelBuffer:(CVPixelBufferRef)outputPixelBuffer
                       withFrame:(RTCVideoFrame*)frame {
-  id<RTCI420Buffer> i420Buffer = [self correctRotation:[frame.buffer toI420]
-                                          withRotation:frame.rotation];
+  id<RTCI420Buffer> i420Buffer = [frame.buffer toI420];
   CVPixelBufferLockBaseAddress(outputPixelBuffer, 0);
 
   const OSType pixelFormat = CVPixelBufferGetPixelFormatType(outputPixelBuffer);
@@ -192,6 +168,56 @@
   CVPixelBufferUnlockBaseAddress(outputPixelBuffer, 0);
 }
 
+// Returns NULL once disposed, so no pool outlives dispose.
+- (CVPixelBufferPoolRef)copyPixelBufferPoolForWidth:(int)width height:(int)height {
+  CVPixelBufferPoolRef pool = NULL;
+  os_unfair_lock_lock(&_lock);
+  if (_textureId != -1) {
+    if (_pixelBufferPool == NULL || _poolSize.width != width || _poolSize.height != height) {
+      CVPixelBufferPoolRelease(_pixelBufferPool);
+      _pixelBufferPool = NULL;
+      NSDictionary* attributes = @{
+        (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferWidthKey : @(width),
+        (id)kCVPixelBufferHeightKey : @(height),
+        (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+      };
+      CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, (__bridge CFDictionaryRef)attributes,
+                              &_pixelBufferPool);
+      _poolSize = CGSizeMake(width, height);
+    }
+    pool = CVPixelBufferPoolRetain(_pixelBufferPool);
+  }
+  os_unfair_lock_unlock(&_lock);
+  return pool;
+}
+
+// Hardware-decoded and camera frames go to Flutter as they are; the rest is converted to BGRA.
+// Neither is rotated: the Dart widget rotates the texture.
+- (CVPixelBufferRef)copyPixelBufferFromFrame:(RTCVideoFrame*)frame {
+  if ([frame.buffer isKindOfClass:[RTCCVPixelBuffer class]]) {
+    RTCCVPixelBuffer* buffer = (RTCCVPixelBuffer*)frame.buffer;
+    const OSType pixelFormat = CVPixelBufferGetPixelFormatType(buffer.pixelBuffer);
+    if (!buffer.requiresCropping && CVPixelBufferGetIOSurface(buffer.pixelBuffer) != NULL &&
+        (pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+         pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+         pixelFormat == kCVPixelFormatType_32BGRA)) {
+      return CVPixelBufferRetain(buffer.pixelBuffer);
+    }
+  }
+
+  CVPixelBufferPoolRef pool = [self copyPixelBufferPoolForWidth:frame.width height:frame.height];
+  CVPixelBufferRef pixelBuffer = NULL;
+  if (pool != NULL) {
+    CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer);
+    CVPixelBufferPoolRelease(pool);
+  }
+  if (pixelBuffer != NULL) {
+    [self copyI420ToCVPixelBuffer:pixelBuffer withFrame:frame];
+  }
+  return pixelBuffer;
+}
+
 #pragma mark - RTCVideoRenderer methods
 - (void)renderFrame:(RTCVideoFrame*)frame {
 
@@ -200,14 +226,19 @@
     os_unfair_lock_unlock(&_lock);
     return;
   }
-  if(!_frameAvailable && _pixelBufferRef) {
-    [self copyI420ToCVPixelBuffer:_pixelBufferRef withFrame:frame];
-    if(_textureId != -1) {
-      [_registry textureFrameAvailable:_textureId];
-    }
+  os_unfair_lock_unlock(&_lock);
+
+  CVPixelBufferRef pixelBuffer = [self copyPixelBufferFromFrame:frame];
+  os_unfair_lock_lock(&_lock);
+  if (pixelBuffer != NULL && _textureId != -1) {
+    CVPixelBufferRef previousPixelBuffer = _pixelBufferRef;
+    _pixelBufferRef = pixelBuffer;
+    pixelBuffer = previousPixelBuffer;
     _frameAvailable = true;
+    [_registry textureFrameAvailable:_textureId];
   }
   os_unfair_lock_unlock(&_lock);
+  CVBufferRelease(pixelBuffer);
 
   // Frames arrive on a decoder thread and this block runs later on the main
   // queue, so the renderer may already have been disposed and freed by the
@@ -258,24 +289,8 @@
   }
 }
 
-/**
- * Sets the size of the video frame to render.
- *
- * @param size The size of the video frame to render.
- */
+// The size is the rotated one; buffers are sized per frame in renderFrame: instead.
 - (void)setSize:(CGSize)size {
-  os_unfair_lock_lock(&_lock);
-  if (size.width != _frameSize.width || size.height != _frameSize.height) {
-    if (_pixelBufferRef) {
-      CVBufferRelease(_pixelBufferRef);
-    }
-    NSDictionary* pixelAttributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
-    CVPixelBufferCreate(kCFAllocatorDefault, size.width, size.height, kCVPixelFormatType_32BGRA,
-                        (__bridge CFDictionaryRef)(pixelAttributes), &_pixelBufferRef);
-    _frameAvailable = false;
-    _frameSize = size;
-  }
-  os_unfair_lock_unlock(&_lock);
 }
 
 #pragma mark - FlutterStreamHandler methods

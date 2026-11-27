@@ -128,6 +128,12 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 - (void)ensureAudioSession;
 - (void)deactiveRtcAudioSession;
 
+/// Serial queue for calls that wait on a WebRTC thread or on the audio server.
+@property(nonatomic, strong, readonly) dispatch_queue_t _Nonnull blockingQueue;
+/// Runs `work` on `blockingQueue`; `done` delivers the value to `result` on the main thread.
+- (void)runBlocking:(void (^_Nonnull)(FlutterResult _Nonnull done))work
+             result:(FlutterResult _Nullable)result;
+
 - (RTCRtpReceiver* _Nullable)getRtpReceiverById:(RTCPeerConnection* _Nonnull)peerConnection
                                              Id:(NSString* _Nonnull)Id;
 - (RTCRtpSender* _Nullable)getRtpSenderById:(RTCPeerConnection* _Nonnull)peerConnection

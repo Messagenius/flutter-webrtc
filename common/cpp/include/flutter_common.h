@@ -10,6 +10,7 @@
 #include <flutter/standard_method_codec.h>
 #include <flutter/texture_registrar.h>
 
+#include <cmath>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -130,8 +131,11 @@ inline int toInt(flutter::EncodableValue inputVal, int defaultVal) {
     intValue = GetValue<int>(inputVal);
   } else if (TypeIs<int32_t>(inputVal)) {
     intValue = GetValue<int32_t>(inputVal);
+  } else if (TypeIs<double>(inputVal)) {
+    intValue = static_cast<int>(std::lround(GetValue<double>(inputVal)));
   } else if (TypeIs<std::string>(inputVal)) {
-    intValue = atoi(GetValue<std::string>(inputVal).c_str());
+    intValue = static_cast<int>(
+        std::lround(atof(GetValue<std::string>(inputVal).c_str())));
   }
   return intValue;
 }

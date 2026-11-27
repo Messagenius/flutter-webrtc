@@ -63,6 +63,9 @@ public class CameraUtils {
       resultError("setFocusMode", "Video capturer not found for id: " + trackId, result);
       return;
     }
+    if (!isCameraOpen("setFocusMode", info, result)) {
+      return;
+    }
 
     if (info.capturer instanceof Camera2Capturer) {
       CameraCaptureSession captureSession;
@@ -182,6 +185,9 @@ public class CameraUtils {
       resultError("setFocusMode", "Video capturer not found for id: " + trackId, result);
       return;
     }
+    if (!isCameraOpen("setFocusPoint", info, result)) {
+      return;
+    }
 
     if (info.capturer instanceof Camera2Capturer) {
       CameraCaptureSession captureSession;
@@ -274,6 +280,9 @@ public class CameraUtils {
     VideoCapturerInfo info = getUserMediaImpl.getCapturerInfo(trackId);
     if (info == null) {
       resultError("setExposurePoint", "Video capturer not found for id: " + trackId, result);
+      return;
+    }
+    if (!isCameraOpen("setExposurePoint", info, result)) {
       return;
     }
 
@@ -373,6 +382,9 @@ public class CameraUtils {
       resultError("hasTorch", "Video capturer not found for id: " + trackId, result);
       return;
     }
+    if (!isCameraOpen("hasTorch", info, result)) {
+      return;
+    }
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && info.capturer instanceof Camera2Capturer) {
       CameraManager manager;
@@ -437,6 +449,9 @@ public class CameraUtils {
     VideoCapturerInfo info = getUserMediaImpl.getCapturerInfo(trackId);
     if (info == null) {
       resultError("setZoom", "Video capturer not found for id: " + trackId, result);
+      return;
+    }
+    if (!isCameraOpen("setZoom", info, result)) {
       return;
     }
 
@@ -550,6 +565,9 @@ public class CameraUtils {
       resultError("setTorch", "Video capturer not found for id: " + trackId, result);
       return;
     }
+    if (!isCameraOpen("setTorch", info, result)) {
+      return;
+    }
     if (info.capturer instanceof Camera2Capturer) {
       CameraCaptureSession captureSession;
       CameraDevice cameraDevice;
@@ -651,6 +669,22 @@ public class CameraUtils {
     result.error(method, errorMsg, null);
     Log.d(TAG, errorMsg);
   }
+
+  // getUserMedia returns before the camera session opens, and switchCamera clears it while switching.
+  private boolean isCameraOpen(String method, VideoCapturerInfo info, MethodChannel.Result result) {
+    Class cameraCapturer = Camera2Capturer.class.getSuperclass();
+    try {
+      if (!cameraCapturer.isInstance(info.capturer)
+              || getPrivateProperty(cameraCapturer, info.capturer, "currentSession") != null) {
+        return true;
+      }
+    } catch (NoSuchFieldWithNameException e) {
+      return true;
+    }
+    resultError(method, "Camera is not open yet", result);
+    return false;
+  }
+
   private Object getPrivateProperty(Class klass, Object object, String fieldName)
           throws NoSuchFieldWithNameException {
     try {

@@ -1,4 +1,5 @@
 #include "flutter_video_renderer.h"
+#include "task_runner.h"
 
 namespace flutter_webrtc_plugin {
 
@@ -50,9 +51,6 @@ void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
     params[EncodableValue("event")] = "didFirstFrameRendered";
     params[EncodableValue("id")] = EncodableValue(texture_id_);
     event_channel_->Success(EncodableValue(params));
-    pixel_buffer_.reset(new FlutterDesktopPixelBuffer());
-    pixel_buffer_->width = 0;
-    pixel_buffer_->height = 0;
     first_frame_rendered = true;
   }
   if (rotation_ != frame->rotation()) {
@@ -169,8 +167,12 @@ void FlutterVideoRendererManager::VideoRendererDispose(
   if (it != renderers_.end()) {
     it->second->SetVideoTrack(nullptr);
 #if defined(_WINDOWS)
-    base_->textures_->UnregisterTexture(texture_id,
-                                        [&, it] { renderers_.erase(it); });
+    // The callback runs on the raster thread; the map belongs to the platform
+    // thread.
+    base_->textures_->UnregisterTexture(texture_id, [this, texture_id] {
+      base_->task_runner_->EnqueueTask(
+          [this, texture_id] { renderers_.erase(texture_id); });
+    });
 #else
     base_->textures_->UnregisterTexture(texture_id);
     renderers_.erase(it);

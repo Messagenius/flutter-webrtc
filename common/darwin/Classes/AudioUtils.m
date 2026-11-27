@@ -2,6 +2,10 @@
 #import "AudioUtils.h"
 #import <AVFoundation/AVFoundation.h>
 
+// What the app set through setAppleAudioConfiguration; nil until it does.
+static AVAudioSessionMode gAppleAudioMode = nil;
+static NSNumber* gAppleAudioCategoryOptions = nil;
+
 @implementation AudioUtils
 
 + (void)ensureAudioSessionWithRecording:(BOOL)recording {
@@ -94,6 +98,17 @@
   return YES;
 }
 
++ (void)clearPreferredInput {
+  RTCAudioSession* rtcSession = [RTCAudioSession sharedInstance];
+  NSError* errOut = nil;
+  [rtcSession lockForConfiguration];
+  // RTCAudioSession's wrapper declares the port nonnull; AVAudioSession takes nil.
+  [rtcSession.session setPreferredInput:nil error:&errOut];
+  [rtcSession unlockForConfiguration];
+  if (errOut != nil)
+    NSLog(@"clearPreferredInput: setPreferredInput failed due to: %@", errOut);
+}
+
 + (void)setSpeakerphoneOn:(BOOL)enable {
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   RTCAudioSessionConfiguration* config = [RTCAudioSessionConfiguration webRTCConfiguration];
@@ -156,9 +171,13 @@
   if (!success)
     NSLog(@"setSpeakerphoneOnButPreferBluetooth: Port override failed due to: %@", error);
 
-  success = [session setActive:YES error:&error];
-  if (!success)
-    NSLog(@"setSpeakerphoneOnButPreferBluetooth: Audio session override failed: %@", error);
+  // RTCAudioSession counts every setActive:YES and hang-up releases only one,
+  // so re-applying the preference must not activate again.
+  if (!session.isActive) {
+    success = [session setActive:YES error:&error];
+    if (!success)
+      NSLog(@"setSpeakerphoneOnButPreferBluetooth: Audio session override failed: %@", error);
+  }
   [session unlockForConfiguration];
 }
 
@@ -216,6 +235,15 @@
   [session unlockForConfiguration];
 }
 
++ (void)restoreAppleAudioConfiguration {
+  RTCAudioSessionConfiguration* config = [RTCAudioSessionConfiguration webRTCConfiguration];
+  config.mode = gAppleAudioMode ?: AVAudioSessionModeVoiceChat;
+  config.categoryOptions = gAppleAudioCategoryOptions != nil
+                               ? gAppleAudioCategoryOptions.unsignedIntegerValue
+                               : AVAudioSessionCategoryOptionAllowBluetooth |
+                                     AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+                                     AVAudioSessionCategoryOptionAllowAirPlay;
+}
 
 + (AVAudioSessionMode)audioSessionModeFromString:(NSString*)mode {
   if([@"default_" isEqualToString:mode]) {
@@ -284,6 +312,7 @@
         config.categoryOptions |= AVAudioSessionCategoryOptionDefaultToSpeaker;
       }
     }
+    gAppleAudioCategoryOptions = @(config.categoryOptions);
   }
 
   if(appleAudioCategory != nil) {
@@ -293,6 +322,7 @@
 
   if(appleAudioMode != nil) {
     config.mode = [AudioUtils audioSessionModeFromString:appleAudioMode];
+    gAppleAudioMode = config.mode;
     [session setMode:config.mode error:nil];
   }
 

@@ -72,15 +72,19 @@ import org.webrtc.VideoCapturer;
 import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 import org.webrtc.audio.JavaAudioDeviceModule;
+import org.webrtc.audio.WebRtcAudioRecordUtils;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 
 import io.flutter.plugin.common.MethodChannel.Result;
 
@@ -106,10 +110,12 @@ public class GetUserMediaImpl {
 
     static final String TAG = FlutterWebRTCPlugin.TAG;
 
-    private final Map<String, VideoCapturerInfoEx> mVideoCapturers = new HashMap<>();
-    private final Map<String, SurfaceTextureHelper> mSurfaceTextureHelpers = new HashMap<>();
+    private final Map<String, VideoCapturerInfoEx> mVideoCapturers = new ConcurrentHashMap<>();
+    private final Map<String, SurfaceTextureHelper> mSurfaceTextureHelpers = new ConcurrentHashMap<>();
+    private final Set<String> closingCameras = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final StateProvider stateProvider;
     private final Context applicationContext;
+    private final Executor executor;
 
     static final int minAPILevel = Build.VERSION_CODES.LOLLIPOP;
 
@@ -255,9 +261,10 @@ public class GetUserMediaImpl {
         }
     }
 
-    GetUserMediaImpl(StateProvider stateProvider, Context applicationContext) {
+    GetUserMediaImpl(StateProvider stateProvider, Context applicationContext, Executor executor) {
         this.stateProvider = stateProvider;
         this.applicationContext = applicationContext;
+        this.executor = executor;
     }
 
     static private void resultError(String method, String error, Result result) {
@@ -716,7 +723,7 @@ public class GetUserMediaImpl {
         if (constraintsMap.getType(key) == ObjectType.Map) {
             ConstraintsMap innerMap = constraintsMap.getMap(key);
             if (innerMap.getType("ideal") == ObjectType.Number) {
-                return innerMap.getInt("ideal");
+                return getConstrainInt(innerMap, "ideal");
             }
         }
 
@@ -770,21 +777,24 @@ public class GetUserMediaImpl {
         // Android Camera2 framework (CameraCaptureSessionImpl.onDisconnected does not guard
         // against ENOSYS from cancelRequest), not an OEM-specific issue.
         final boolean requestedFacingFront = isFacing;
-        for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
-            VideoCapturerInfoEx existing = entry.getValue();
-            // Screen capturers are registered with a null cameraName, so these
-            // checks must run before cameraName is dereferenced below.
-            if (existing.isScreenCapture || existing.primaryTrackId != null
-                    || existing.videoSource == null || existing.cameraName == null) {
-                continue;
-            }
-            boolean sameCamera = (deviceId != null && !deviceId.isEmpty())
-                    ? existing.cameraName.equals(deviceId)
-                    : cameraEnumerator.isFrontFacing(existing.cameraName) == requestedFacingFront;
-            if (sameCamera) {
-                Log.w(TAG, "getUserMedia(video): camera already active (track=" + entry.getKey()
-                        + "), reusing VideoSource to prevent concurrent camera access");
-                return buildSharedVideoTrack(existing, entry.getKey(), mediaStream);
+        // Locked against removeVideoCapturer on the executor, so a closing capturer is never shared.
+        synchronized (mVideoCapturers) {
+            for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
+                VideoCapturerInfoEx existing = entry.getValue();
+                // Screen capturers are registered with a null cameraName, so these
+                // checks must run before cameraName is dereferenced below.
+                if (existing.isScreenCapture || existing.primaryTrackId != null
+                        || existing.videoSource == null || existing.cameraName == null) {
+                    continue;
+                }
+                boolean sameCamera = (deviceId != null && !deviceId.isEmpty())
+                        ? existing.cameraName.equals(deviceId)
+                        : cameraEnumerator.isFrontFacing(existing.cameraName) == requestedFacingFront;
+                if (sameCamera) {
+                    Log.w(TAG, "getUserMedia(video): camera already active (track=" + entry.getKey()
+                            + "), reusing VideoSource to prevent concurrent camera access");
+                    return buildSharedVideoTrack(existing, entry.getKey(), mediaStream);
+                }
             }
         }
         CameraEventsHandler cameraEventsHandler = new CameraEventsHandler();
@@ -874,11 +884,20 @@ public class GetUserMediaImpl {
         info.cameraEventsHandler = cameraEventsHandler;
         info.videoSource = videoSource;
         info.facingMode = facingMode;
-        videoCapturer.startCapture(targetWidth, targetHeight, targetFps);
+        boolean cameraClosing = closingCameras.contains(deviceId);
+        if (!cameraClosing) {
+            videoCapturer.startCapture(targetWidth, targetHeight, targetFps);
+        }
 
         String trackId = stateProvider.getNextTrackUUID();
         mVideoCapturers.put(trackId, info);
         mSurfaceTextureHelpers.put(trackId, surfaceTextureHelper);
+        if (cameraClosing) {
+            // The executor is blocked in removeVideoCapturer closing this camera, so the start runs after the close.
+            Log.w(TAG, "getUserMedia(video): camera " + deviceId + " is closing, deferring startCapture");
+            VideoCapturer capturer = videoCapturer;
+            executor.execute(() -> capturer.startCapture(targetWidth, targetHeight, targetFps));
+        }
 
         Log.d(TAG, "Target: " + targetWidth + "x" + targetHeight + "@" + targetFps + ", Actual: " + info.width + "x" + info.height + "@" + info.fps);
 
@@ -962,67 +981,76 @@ public class GetUserMediaImpl {
     }
 
     void removeVideoCapturer(String id) {
-        VideoCapturerInfoEx info = mVideoCapturers.get(id);
-        if (info == null) return;
+        VideoCapturerInfoEx info;
+        synchronized (mVideoCapturers) {
+            info = mVideoCapturers.get(id);
+            if (info == null) return;
 
-        if (info.primaryTrackId != null) {
-            // Shared (secondary) track - the underlying capturer belongs to the primary.
-            // Just unregister this entry; the capturer keeps running.
-            Log.d(TAG, "removeVideoCapturer: removing shared track " + id
-                    + " (primary=" + info.primaryTrackId + ")");
-            mVideoCapturers.remove(id);
-            return;
-        }
-
-        // Primary capturer being removed. Check whether any shared track still references it.
-        String newPrimaryId = null;
-        for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
-            if (id.equals(entry.getValue().primaryTrackId)) {
-                newPrimaryId = entry.getKey();
-                break;
+            if (info.primaryTrackId != null) {
+                // Shared (secondary) track - the underlying capturer belongs to the primary.
+                // Just unregister this entry; the capturer keeps running.
+                Log.d(TAG, "removeVideoCapturer: removing shared track " + id
+                        + " (primary=" + info.primaryTrackId + ")");
+                mVideoCapturers.remove(id);
+                return;
             }
-        }
 
-        if (newPrimaryId != null) {
-            // At least one shared track is still alive. Promote it to primary so the
-            // capturer keeps running and remaining shared tracks stay valid.
-            VideoCapturerInfoEx promoted = mVideoCapturers.get(newPrimaryId);
-            promoted.primaryTrackId = null;
-            promoted.capturer = info.capturer;
-            promoted.cameraEventsHandler = info.cameraEventsHandler;
-
-            SurfaceTextureHelper helper = mSurfaceTextureHelpers.remove(id);
-            if (helper != null) mSurfaceTextureHelpers.put(newPrimaryId, helper);
-
-            // Re-point every remaining shared track to the new primary.
+            // Primary capturer being removed. Check whether any shared track still references it.
+            String newPrimaryId = null;
             for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
                 if (id.equals(entry.getValue().primaryTrackId)) {
-                    entry.getValue().primaryTrackId = newPrimaryId;
+                    newPrimaryId = entry.getKey();
+                    break;
                 }
             }
 
-            mVideoCapturers.remove(id);
-            Log.d(TAG, "removeVideoCapturer: promoted " + newPrimaryId
-                    + " to primary capturer (was " + id + ")");
-        } else {
-            // No shared tracks - stop and dispose the capturer normally.
-            try {
-                info.capturer.stopCapture();
-                if (info.cameraEventsHandler != null) {
-                    info.cameraEventsHandler.waitForCameraClosed();
+            if (newPrimaryId != null) {
+                // At least one shared track is still alive. Promote it to primary so the
+                // capturer keeps running and remaining shared tracks stay valid.
+                VideoCapturerInfoEx promoted = mVideoCapturers.get(newPrimaryId);
+                promoted.primaryTrackId = null;
+                promoted.capturer = info.capturer;
+                promoted.cameraEventsHandler = info.cameraEventsHandler;
+
+                SurfaceTextureHelper helper = mSurfaceTextureHelpers.remove(id);
+                if (helper != null) mSurfaceTextureHelpers.put(newPrimaryId, helper);
+
+                // Re-point every remaining shared track to the new primary.
+                for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
+                    if (id.equals(entry.getValue().primaryTrackId)) {
+                        entry.getValue().primaryTrackId = newPrimaryId;
+                    }
                 }
-            } catch (InterruptedException e) {
-                Log.e(TAG, "removeVideoCapturer() Failed to stop video capturer");
-            } finally {
-                info.capturer.dispose();
+
                 mVideoCapturers.remove(id);
-                SurfaceTextureHelper helper = mSurfaceTextureHelpers.get(id);
-                if (helper != null) {
-                    helper.stopListening();
-                    helper.dispose();
-                    mSurfaceTextureHelpers.remove(id);
-                }
+                Log.d(TAG, "removeVideoCapturer: promoted " + newPrimaryId
+                        + " to primary capturer (was " + id + ")");
+                return;
             }
+
+            // Unregistered before the blocking stop, so getUserVideo opens a new camera
+            // instead of sharing the source of this closing one.
+            mVideoCapturers.remove(id);
+            if (info.cameraName != null) closingCameras.add(info.cameraName);
+        }
+
+        // No shared tracks - stop and dispose the capturer normally.
+        try {
+            info.capturer.stopCapture();
+            if (info.cameraEventsHandler != null) {
+                info.cameraEventsHandler.waitForCameraClosed();
+            }
+        } catch (InterruptedException e) {
+            Log.e(TAG, "removeVideoCapturer() Failed to stop video capturer");
+        } finally {
+            info.capturer.dispose();
+            SurfaceTextureHelper helper = mSurfaceTextureHelpers.get(id);
+            if (helper != null) {
+                helper.stopListening();
+                helper.dispose();
+                mSurfaceTextureHelpers.remove(id);
+            }
+            if (info.cameraName != null) closingCameras.remove(info.cameraName);
         }
     }
 
@@ -1200,6 +1228,12 @@ public class GetUserMediaImpl {
                 }
             }
         }
+    }
+
+    @RequiresApi(api = VERSION_CODES.M)
+    void clearPreferredInputDevice() {
+        preferredInput = null;
+        WebRtcAudioRecordUtils.clearPreferredInputDevice(audioDeviceModule);
     }
 
     @RequiresApi(api = VERSION_CODES.M)

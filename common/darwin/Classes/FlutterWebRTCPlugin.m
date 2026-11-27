@@ -303,6 +303,9 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   self.keyProviders = [NSMutableDictionary new];
   self.videoCapturerStopHandlers = [NSMutableDictionary new];
   self.recorders = [NSMutableDictionary new];
+  _blockingQueue = dispatch_queue_create(
+      "FlutterWebRTC.blocking",
+      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
 #if TARGET_OS_IPHONE
   self.focusMode = @"locked";
   self.exposureMode = @"locked";
@@ -669,27 +672,32 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSDictionary* configuration = argsMap[@"configuration"];
     NSDictionary* constraints = argsMap[@"constraints"];
 
-    RTCPeerConnection* peerConnection = [self.peerConnectionFactory
-        peerConnectionWithConfiguration:[self RTCConfiguration:configuration]
-                            constraints:[self parseMediaConstraints:constraints]
-                               delegate:self];
+    RTCPeerConnectionFactory* factory = self.peerConnectionFactory;
+    RTCConfiguration* rtcConfiguration = [self RTCConfiguration:configuration];
+    RTCMediaConstraints* mediaConstraints = [self parseMediaConstraints:constraints];
+    [self runBlocking:^(FlutterResult done) {
+      done([factory peerConnectionWithConfiguration:rtcConfiguration
+                                        constraints:mediaConstraints
+                                           delegate:self]);
+    } result:^(id value) {
+      RTCPeerConnection* peerConnection = value;
+      peerConnection.remoteStreams = [NSMutableDictionary new];
+      peerConnection.remoteTracks = [NSMutableDictionary new];
+      peerConnection.dataChannels = [NSMutableDictionary new];
 
-    peerConnection.remoteStreams = [NSMutableDictionary new];
-    peerConnection.remoteTracks = [NSMutableDictionary new];
-    peerConnection.dataChannels = [NSMutableDictionary new];
+      NSString* peerConnectionId = [[NSUUID UUID] UUIDString];
+      peerConnection.flutterId = peerConnectionId;
 
-    NSString* peerConnectionId = [[NSUUID UUID] UUIDString];
-    peerConnection.flutterId = peerConnectionId;
+      /*Create Event Channel.*/
+      peerConnection.eventChannel = [FlutterEventChannel
+          eventChannelWithName:[NSString stringWithFormat:@"FlutterWebRTC/peerConnectionEvent%@",
+                                                          peerConnectionId]
+               binaryMessenger:self->_messenger];
+      [peerConnection.eventChannel setStreamHandler:peerConnection];
 
-    /*Create Event Channel.*/
-    peerConnection.eventChannel = [FlutterEventChannel
-        eventChannelWithName:[NSString stringWithFormat:@"FlutterWebRTC/peerConnectionEvent%@",
-                                                        peerConnectionId]
-             binaryMessenger:_messenger];
-    [peerConnection.eventChannel setStreamHandler:peerConnection];
-
-    self.peerConnections[peerConnectionId] = peerConnection;
-    result(@{@"peerConnectionId" : peerConnectionId});
+      self.peerConnections[peerConnectionId] = peerConnection;
+      result(@{@"peerConnectionId" : peerConnectionId});
+    }];
   } else if ([@"getUserMedia" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* constraints = argsMap[@"constraints"];
@@ -720,7 +728,13 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   } else if ([@"createLocalMediaStream" isEqualToString:call.method]) {
     [self createLocalMediaStream:result];
   } else if ([@"getSources" isEqualToString:call.method]) {
+#if TARGET_OS_IPHONE
+    [self runBlocking:^(FlutterResult done) {
+      [self getSources:done];
+    } result:result];
+#else
     [self getSources:result];
+#endif
   } else if ([@"selectAudioInput" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* deviceId = argsMap[@"deviceId"];
@@ -908,7 +922,9 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
 
     if (peerConnection) {
-      [self peerConnectionAddICECandidate:candidate peerConnection:peerConnection result:result];
+      [self runBlocking:^(FlutterResult done) {
+        [self peerConnectionAddICECandidate:candidate peerConnection:peerConnection result:done];
+      } result:result];
     } else {
       result([FlutterError
           errorWithCode:[NSString stringWithFormat:@"%@Failed", call.method]
@@ -921,13 +937,13 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     id trackId = argsMap[@"trackId"];
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
     if (peerConnection) {
-      if (trackId != nil && trackId != [NSNull null]) {
-        return [self peerConnectionGetStatsForTrackId:trackId
-                                       peerConnection:peerConnection
-                                               result:result];
-      } else {
-        return [self peerConnectionGetStats:peerConnection result:result];
-      }
+      [self runBlocking:^(FlutterResult done) {
+        if (trackId != nil && trackId != [NSNull null]) {
+          [self peerConnectionGetStatsForTrackId:trackId peerConnection:peerConnection result:done];
+        } else {
+          [self peerConnectionGetStats:peerConnection result:done];
+        }
+      } result:result];
     } else {
       result([FlutterError
           errorWithCode:[NSString stringWithFormat:@"%@Failed", call.method]
@@ -972,13 +988,14 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     RTCMediaStream* stream = self.localStreams[streamId];
     BOOL shouldCallResult = YES;
     if (stream) {
+      NSArray* renderers = self.renders.allValues;
       for (RTCVideoTrack* track in stream.videoTracks) {
         [_localTracks removeObjectForKey:track.trackId];
         RTCVideoTrack* videoTrack = (RTCVideoTrack*)track;
-        FlutterRTCVideoRenderer *renderer = [self findRendererByTrackId:videoTrack.trackId];
-        if(renderer != nil) {
-          renderer.videoTrack = nil;
-        }
+        NSString* trackId = videoTrack.trackId;
+        dispatch_async(_blockingQueue, ^{
+          [self findRendererByTrackId:trackId inRenderers:renderers].videoTrack = nil;
+        });
         CapturerStopHandler stopHandler = self.videoCapturerStopHandlers[videoTrack.trackId];
         if (stopHandler) {
           shouldCallResult = NO;
@@ -1007,10 +1024,11 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
 
     RTCMediaStreamTrack* track = [self trackForId:trackId peerConnectionId:peerConnectionId];
-    if (track != nil) {
-      track.isEnabled = enabled.boolValue;
-    }
-    result(nil);
+    BOOL isEnabled = enabled.boolValue;
+    [self runBlocking:^(FlutterResult done) {
+      track.isEnabled = isEnabled;
+      done(nil);
+    } result:result];
   } else if ([@"mediaStreamAddTrack" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* streamId = argsMap[@"streamId"];
@@ -1093,10 +1111,10 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     if (audioTrack) {
       [self ensureAudioSession];
     }
-    FlutterRTCVideoRenderer *renderer = [self findRendererByTrackId:trackId];
-    if(renderer != nil) {
-      renderer.videoTrack = nil;
-    }
+    NSArray* renderers = self.renders.allValues;
+    dispatch_async(_blockingQueue, ^{
+      [self findRendererByTrackId:trackId inRenderers:renderers].videoTrack = nil;
+    });
     result(nil);
   } else if ([@"restartIce" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
@@ -1117,9 +1135,16 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     BOOL isDispose = [@"peerConnectionDispose" isEqualToString:call.method];
 
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
-    if (peerConnection) {
+    if (!peerConnection) {
+      [self deactiveRtcAudioSession];
+      result(nil);
+      return;
+    }
+    [self runBlocking:^(FlutterResult done) {
       // Closing twice is harmless, the native peer connection ignores the second call.
       [peerConnection close];
+      done(nil);
+    } result:^(id value) {
       peerConnection.closedByPlugin = YES;
 
       // Clean up peerConnection's streams and tracks
@@ -1147,9 +1172,9 @@ static void FlutterWebRTCApplyFieldTrials(void) {
         peerConnection.eventChannel = nil;
         [self.peerConnections removeObjectForKey:peerConnectionId];
       }
-    }
-    [self deactiveRtcAudioSession];
-    result(nil);
+      [self deactiveRtcAudioSession];
+      result(nil);
+    }];
   } else if ([@"createVideoRenderer" isEqualToString:call.method]) {
     FlutterRTCVideoRenderer* render = [self createWithTextureRegistry:_textures
                                                             messenger:_messenger];
@@ -1159,12 +1184,19 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSDictionary* argsMap = call.arguments;
     NSNumber* textureId = argsMap[@"textureId"];
     FlutterRTCVideoRenderer* render = self.renders[textureId];
-    if(render != nil) {
-      render.videoTrack = nil;
-      [render dispose];
-      [self.renders removeObjectForKey:textureId];
+    if (render == nil) {
+      result(nil);
+      return;
     }
-    result(nil);
+    [self.renders removeObjectForKey:textureId];
+    // After any queued srcObject change; the texture is unregistered on the main thread.
+    [self runBlocking:^(FlutterResult done) {
+      render.videoTrack = nil;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [render dispose];
+      });
+      done(nil);
+    } result:result];
   } else if ([@"videoRendererSetSrcObject" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSNumber* textureId = argsMap[@"textureId"];
@@ -1179,27 +1211,30 @@ static void FlutterWebRTCApplyFieldTrials(void) {
       return;
     }
     RTCMediaStream* stream = nil;
-    RTCVideoTrack* videoTrack = nil;
     if ([ownerTag isEqualToString:@"local"]) {
       stream = _localStreams[streamId];
     }
     if (!stream) {
       stream = [self streamForId:streamId peerConnectionId:ownerTag];
     }
-    if (stream) {
-      NSArray* videoTracks = stream ? stream.videoTracks : nil;
-      videoTrack = videoTracks && videoTracks.count ? videoTracks[0] : nil;
-      for (RTCVideoTrack* track in videoTracks) {
-        if ([track.trackId isEqualToString:trackId]) {
-          videoTrack = track;
+    // `videoTracks` and the sink change both wait on WebRTC threads.
+    [self runBlocking:^(FlutterResult done) {
+      RTCVideoTrack* videoTrack = nil;
+      if (stream) {
+        NSArray* videoTracks = stream.videoTracks;
+        videoTrack = videoTracks.count ? videoTracks[0] : nil;
+        for (RTCVideoTrack* track in videoTracks) {
+          if ([track.trackId isEqualToString:trackId]) {
+            videoTrack = track;
+          }
+        }
+        if (!videoTrack) {
+          NSLog(@"Not found video track for RTCMediaStream: %@", streamId);
         }
       }
-      if (!videoTrack) {
-        NSLog(@"Not found video track for RTCMediaStream: %@", streamId);
-      }
-    }
-    [self rendererSetSrcObject:render stream:videoTrack];
-    result(nil);
+      [self rendererSetSrcObject:render stream:videoTrack];
+      done(nil);
+    } result:result];
   }
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
   else if ([@"videoPlatformViewRendererSetSrcObject" isEqualToString:call.method]) {
@@ -1408,11 +1443,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSString* trackId = argsMap[@"trackId"];
     NSNumber* mute = argsMap[@"mute"];
     id<LocalTrack> track = self.localTracks[trackId];
-    if (track != nil && [track isKindOfClass:[LocalAudioTrack class]]) {
-      RTCAudioTrack* audioTrack = ((LocalAudioTrack*)track).audioTrack;
-      audioTrack.isEnabled = !mute.boolValue;
-    }
-    result(nil);
+    RTCAudioTrack* audioTrack = [track isKindOfClass:[LocalAudioTrack class]] ? ((LocalAudioTrack*)track).audioTrack : nil;
+    BOOL isEnabled = !mute.boolValue;
+    [self runBlocking:^(FlutterResult done) {
+      audioTrack.isEnabled = isEnabled;
+      done(nil);
+    } result:result];
   }
 #if TARGET_OS_IPHONE
   else if ([@"enableSpeakerphone" isEqualToString:call.method]) {
@@ -1421,40 +1457,67 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     _speakerOn = enable.boolValue;
     _speakerOnButPreferBluetooth = NO;
     _speakerPreferenceSet = YES;
-    if (self.audioSessionManagementEnabled) {
-      [AudioUtils setSpeakerphoneOn:_speakerOn];
-      postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+    if (!self.audioSessionManagementEnabled) {
+      result(nil);
+      return;
     }
-    result(nil);
+    BOOL speakerOn = _speakerOn;
+    [self runBlocking:^(FlutterResult done) {
+      [AudioUtils setSpeakerphoneOn:speakerOn];
+      postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+      done(nil);
+    } result:result];
   }
   else if ([@"ensureAudioSession" isEqualToString:call.method]) {
     [self ensureAudioSession];
-    result(nil);
+    // The queue is serial, so this completes after the session work queued above.
+    [self runBlocking:^(FlutterResult done) {
+      done(nil);
+    } result:result];
+  }
+  else if ([@"clearPreferredAudioInput" isEqualToString:call.method]) {
+    self.preferredInputUID = nil;
+    if (!self.audioSessionManagementEnabled) {
+      result(nil);
+      return;
+    }
+    [self runBlocking:^(FlutterResult done) {
+      [AudioUtils clearPreferredInput];
+      done(nil);
+    } result:result];
   }
   else if ([@"enableSpeakerphoneButPreferBluetooth" isEqualToString:call.method]) {
     _speakerOn = YES;
     _speakerOnButPreferBluetooth = YES;
     _speakerPreferenceSet = YES;
-    if (self.audioSessionManagementEnabled) {
-      [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+    if (!self.audioSessionManagementEnabled) {
+      result(nil);
+      return;
     }
-    result(nil);
+    [self runBlocking:^(FlutterResult done) {
+      [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+      done(nil);
+    } result:result];
   }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
-    if (self.audioSessionManagementEnabled) {
-      [AudioUtils setAppleAudioConfiguration:configuration];
-      // The app has taken explicit control of the session; drop any sticky
-      // speaker preference so the engine-lifecycle hooks honor the configured
-      // mode (voiceChat → earpiece, videoChat → speaker) instead of re-applying
-      // a preference left over from an earlier call. A later
-      // enableSpeakerphone/selectAudioOutput re-establishes the preference.
-      _speakerPreferenceSet = NO;
-      _speakerOn = NO;
-      _speakerOnButPreferBluetooth = NO;
+    if (!self.audioSessionManagementEnabled) {
+      result(nil);
+      return;
     }
-    result(nil);
+    // The app has taken explicit control of the session; drop any sticky
+    // speaker preference so the engine-lifecycle hooks honor the configured
+    // mode (voiceChat → earpiece, videoChat → speaker) instead of re-applying
+    // a preference left over from an earlier call. A later
+    // enableSpeakerphone/selectAudioOutput re-establishes the preference.
+    _speakerPreferenceSet = NO;
+    _speakerOn = NO;
+    _speakerOnButPreferBluetooth = NO;
+    [self runBlocking:^(FlutterResult done) {
+      [AudioUtils setAppleAudioConfiguration:configuration];
+      done(nil);
+    } result:result];
   }
 #endif
   else if ([@"getLocalDescription" isEqualToString:call.method]) {
@@ -1462,13 +1525,15 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
     if (peerConnection) {
-      RTCSessionDescription* sdp = peerConnection.localDescription;
-      if (nil == sdp) {
-        result(nil);
-      } else {
-        NSString* type = [RTCSessionDescription stringForType:sdp.type];
-        result(@{@"sdp" : sdp.sdp, @"type" : type});
-      }
+      [self runBlocking:^(FlutterResult done) {
+        RTCSessionDescription* sdp = peerConnection.localDescription;
+        if (nil == sdp) {
+          done(nil);
+        } else {
+          NSString* type = [RTCSessionDescription stringForType:sdp.type];
+          done(@{@"sdp" : sdp.sdp, @"type" : type});
+        }
+      } result:result];
     } else {
       result([FlutterError
           errorWithCode:[NSString stringWithFormat:@"%@Failed", call.method]
@@ -1480,13 +1545,15 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
     if (peerConnection) {
-      RTCSessionDescription* sdp = peerConnection.remoteDescription;
-      if (nil == sdp) {
-        result(nil);
-      } else {
-        NSString* type = [RTCSessionDescription stringForType:sdp.type];
-        result(@{@"sdp" : sdp.sdp, @"type" : type});
-      }
+      [self runBlocking:^(FlutterResult done) {
+        RTCSessionDescription* sdp = peerConnection.remoteDescription;
+        if (nil == sdp) {
+          done(nil);
+        } else {
+          NSString* type = [RTCSessionDescription stringForType:sdp.type];
+          done(@{@"sdp" : sdp.sdp, @"type" : type});
+        }
+      } result:result];
     } else {
       result([FlutterError
           errorWithCode:[NSString stringWithFormat:@"%@Failed", call.method]
@@ -1529,16 +1596,18 @@ static void FlutterWebRTCApplyFieldTrials(void) {
                                  details:nil]);
       return;
     }
-    RTCRtpSender* sender = [peerConnection addTrack:track streamIds:streamIds];
-    if (sender == nil) {
-      result([FlutterError
-          errorWithCode:[NSString stringWithFormat:@"%@Failed", call.method]
-                message:[NSString stringWithFormat:@"Error: peerConnection.addTrack failed!"]
-                details:nil]);
-      return;
-    }
+    [self runBlocking:^(FlutterResult done) {
+      RTCRtpSender* sender = [peerConnection addTrack:track streamIds:streamIds];
+      if (sender == nil) {
+        done([FlutterError
+            errorWithCode:[NSString stringWithFormat:@"%@Failed", call.method]
+                  message:[NSString stringWithFormat:@"Error: peerConnection.addTrack failed!"]
+                  details:nil]);
+        return;
+      }
 
-    result([self rtpSenderToMap:sender]);
+      done([self rtpSenderToMap:sender]);
+    } result:result];
   } else if ([@"removeTrack" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
@@ -1811,12 +1880,14 @@ static void FlutterWebRTCApplyFieldTrials(void) {
       return;
     }
 
-    NSMutableArray* senders = [NSMutableArray array];
-    for (RTCRtpSender* sender in peerConnection.senders) {
-      [senders addObject:[self rtpSenderToMap:sender]];
-    }
+    [self runBlocking:^(FlutterResult done) {
+      NSMutableArray* senders = [NSMutableArray array];
+      for (RTCRtpSender* sender in peerConnection.senders) {
+        [senders addObject:[self rtpSenderToMap:sender]];
+      }
 
-    result(@{@"senders" : senders});
+      done(@{@"senders" : senders});
+    } result:result];
   } else if ([@"getReceivers" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
@@ -2100,15 +2171,33 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   return NO;
 }
 
+- (void)runBlocking:(void (^)(FlutterResult done))work result:(FlutterResult)result {
+  FlutterResult done = ^(id _Nullable value) {
+    if (result == nil) {
+      return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      result(value);
+    });
+  };
+  dispatch_async(_blockingQueue, ^{
+    work(done);
+  });
+}
+
 - (void)ensureAudioSession {
 #if TARGET_OS_IPHONE
   if (!self.audioSessionManagementEnabled) {
     return;
   }
-  [AudioUtils ensureAudioSessionWithRecording:[self hasLocalAudioTrack]];
-  // Covers the didAddStream/track paths when the audio unit is already
-  // running and audioSessionDidStartPlayOrRecord: won't fire again.
-  [self reapplySpeakerPreference];
+  BOOL recording = [self hasLocalAudioTrack];
+  // Also called from WebRTC's signaling thread, which must not wait on the audio server either.
+  dispatch_async(_blockingQueue, ^{
+    [AudioUtils ensureAudioSessionWithRecording:recording];
+    // Covers the didAddStream/track paths when the audio unit is already
+    // running and audioSessionDidStartPlayOrRecord: won't fire again.
+    [self reapplySpeakerPreference];
+  });
 #endif
 }
 
@@ -2132,18 +2221,18 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   if (![self hasLocalAudioTrack] && ![self hasOpenPeerConnection]) {
     // The call session is fully over: the speaker preference is per-call
     // state, so drop it (and any mode/options it leaked into the shared
-    // WebRTC configuration) so the next call starts from a clean default
-    // instead of inheriting the previous call's routing. The mic preference
-    // (preferredInputUID) intentionally survives across calls.
+    // WebRTC configuration) so the next call starts from the app's
+    // configuration instead of inheriting the previous call's routing. The
+    // mic preference (preferredInputUID) intentionally survives across calls.
     _speakerOn = NO;
     _speakerOnButPreferBluetooth = NO;
     _speakerPreferenceSet = NO;
-    RTCAudioSessionConfiguration* config = [RTCAudioSessionConfiguration webRTCConfiguration];
-    config.mode = AVAudioSessionModeVoiceChat;
-    config.categoryOptions = AVAudioSessionCategoryOptionAllowBluetooth |
-                             AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-                             AVAudioSessionCategoryOptionAllowAirPlay;
-    [AudioUtils deactiveRtcAudioSession];
+    // Queued after any pending route change of the same call, which also
+    // writes the shared configuration.
+    dispatch_async(_blockingQueue, ^{
+      [AudioUtils restoreAppleAudioConfiguration];
+      [AudioUtils deactiveRtcAudioSession];
+    });
   }
 #endif
 }
@@ -3037,8 +3126,11 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   return params;
 }
 
-- (FlutterRTCVideoRenderer *)findRendererByTrackId:(NSString *)trackId {
-    for (FlutterRTCVideoRenderer *renderer in self.renders.allValues) {
+// Run on blockingQueue with `renders` snapshotted on the main thread, so the
+// match sees any srcObject change queued before it.
+- (FlutterRTCVideoRenderer *)findRendererByTrackId:(NSString *)trackId
+                                       inRenderers:(NSArray<FlutterRTCVideoRenderer *> *)renderers {
+    for (FlutterRTCVideoRenderer *renderer in renderers) {
         if (renderer.videoTrack != nil && [renderer.videoTrack.trackId isEqualToString:trackId]) {
             return renderer;
         }

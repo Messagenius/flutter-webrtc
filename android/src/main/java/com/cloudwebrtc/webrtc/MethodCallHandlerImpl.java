@@ -273,7 +273,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
     PeerConnectionFactory.initialize(initializationOptionsBuilder.createInitializationOptions());
 
-    getUserMediaImpl = new GetUserMediaImpl(this, context);
+    getUserMediaImpl = new GetUserMediaImpl(this, context, executor);
 
     cameraUtils = new CameraUtils(getUserMediaImpl, activity);
 
@@ -822,11 +822,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         for (int i = 0; i < renders.size(); i++) {
           FlutterRTCVideoRenderer renderer = renders.valueAt(i);
           if (renderer.checkMediaStream(streamId, "local")) {
+            LocalTrack track;
             synchronized (localTracks) {
-              LocalTrack track = localTracks.get(trackId);
-              if(track != null && track.kind().equals("video")) {
-                renderer.setVideoTrack((VideoTrack) track.track);
-              }
+              track = localTracks.get(trackId);
+            }
+            if(track != null && track.kind().equals("video")) {
+              renderer.setVideoTrack((VideoTrack) track.track);
             }
           }
         }
@@ -1012,6 +1013,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         } else {
           result.notImplemented();
         }
+        break;
+      case "clearPreferredAudioInput":
+        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.LOLLIPOP_MR1) {
+          getUserMediaImpl.clearPreferredInputDevice();
+        }
+        result.success(null);
         break;
       case "setAndroidAudioConfiguration": {
         Map<String, Object> configuration = call.argument("configuration");

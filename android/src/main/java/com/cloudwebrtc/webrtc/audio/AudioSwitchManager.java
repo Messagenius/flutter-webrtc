@@ -354,14 +354,13 @@ public class AudioSwitchManager {
         if (enable) {
             selectAudioOutput(AudioDevice.Speakerphone.class);
         } else {
-            // Fall back to automatic selection: with the earpiece-first preferred
-            // list this yields bluetooth > wired headset > earpiece.
-            desiredAudioDevice = null;
-            desiredPreferHeadset = false;
+            // Bluetooth > wired headset > earpiece, re-applied when devices change.
+            desiredAudioDevice = AudioDevice.Earpiece.class;
+            desiredPreferHeadset = true;
             handler.post(() -> {
                 AudioSwitch audioSwitch = getOrCreateAudioSwitch();
                 if (audioSwitch != null) {
-                    audioSwitch.selectDevice(null);
+                    applyDesiredAudioOutput(audioSwitch);
                 }
             });
         }

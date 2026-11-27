@@ -63,9 +63,10 @@ bool FlutterFrameCryptor::HandleFrameCryptorMethodCall(
     std::unique_ptr<MethodResultProxy> result,
     std::unique_ptr<MethodResultProxy>* outResult) {
   const std::string& method_name = method_call.method_name();
-  if (!method_call.arguments()) {
-    result->Error("Bad Arguments", "Null arguments received");
-    return true;
+  if (!method_call.arguments() ||
+      !TypeIs<EncodableMap>(*method_call.arguments())) {
+    *outResult = std::move(result);
+    return false;
   }
   const EncodableMap params = GetValue<EncodableMap>(*method_call.arguments());
 

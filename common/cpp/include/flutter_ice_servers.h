@@ -2,6 +2,7 @@
 #define FLUTTER_WEBRTC_ICE_SERVERS_H_
 
 #include <cstddef>
+#include <iostream>
 #include <string>
 #include <variant>
 
@@ -28,7 +29,12 @@ size_t ParseIceServers(const flutter::EncodableList& servers,
     const std::string username = read_string("username");
     const std::string password = read_string("credential");
     const auto append = [&](const std::string& url) {
-      if (url.empty() || count == N) return;
+      if (url.empty()) return;
+      if (count == N) {
+        std::cerr << "[FlutterWebRTC] ICE server URL dropped, limit of " << N
+                  << " URLs reached: " << url << "\n";
+        return;
+      }
       auto& entry = output[count++];
       entry.uri = url;
       entry.username = username;

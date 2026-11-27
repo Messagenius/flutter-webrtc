@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:webrtc_interface/webrtc_interface.dart';
@@ -23,6 +24,10 @@ class RTCVideoView extends StatelessWidget {
   final WidgetBuilder? placeholderBuilder;
 
   RTCVideoRenderer get videoRenderer => _renderer;
+
+  bool get _rotatesTexture =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS;
 
   @override
   Widget build(BuildContext context) {
@@ -49,19 +54,22 @@ class RTCVideoView extends StatelessWidget {
                 return SizedBox(
                   width: constraints.maxHeight * value.aspectRatio,
                   height: constraints.maxHeight,
-                  child: child,
+                  child: Transform(
+                    transform: Matrix4.identity()..rotateY(mirror ? -pi : 0.0),
+                    alignment: FractionalOffset.center,
+                    child: videoRenderer.renderVideo
+                        ? RotatedBox(
+                            // Only iOS/macOS textures arrive unrotated.
+                            quarterTurns: _rotatesTexture ? value.rotation ~/ 90 : 0,
+                            child: Texture(
+                              textureId: videoRenderer.textureId!,
+                              filterQuality: filterQuality,
+                            ),
+                          )
+                        : placeholderBuilder?.call(context) ?? Container(),
+                  ),
                 );
               },
-              child: Transform(
-                transform: Matrix4.identity()..rotateY(mirror ? -pi : 0.0),
-                alignment: FractionalOffset.center,
-                child: videoRenderer.renderVideo
-                    ? Texture(
-                        textureId: videoRenderer.textureId!,
-                        filterQuality: filterQuality,
-                      )
-                    : placeholderBuilder?.call(context) ?? Container(),
-              ),
             ),
           ),
         ),

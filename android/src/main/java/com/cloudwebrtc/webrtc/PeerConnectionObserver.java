@@ -60,13 +60,16 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   final Map<String, MediaStream> remoteStreams = new ConcurrentHashMap<>();
   private final RemoteTrackRegistry<MediaStreamTrack> remoteTracks =
       new RemoteTrackRegistry<>();
-  final Map<String, RtpTransceiver> transceivers = new HashMap<>();
+  final Map<String, RtpTransceiver> transceivers = new ConcurrentHashMap<>();
   private final StateProvider stateProvider;
   private final EventChannel eventChannel;
   private volatile EventChannel.EventSink eventSink;
   private final ExecutorService executor;
   private final Handler mainHandler;
   private volatile boolean closed;
+  // WebRTC calls onTrack right before onAddTrack for the same transceiver, both on the signaling thread.
+  // Using it avoids peerConnection.getTransceivers(), which disposes the wrappers the executor works with.
+  private RtpTransceiver trackTransceiver;
 
   PeerConnectionObserver(PeerConnection.RTCConfiguration configuration, StateProvider stateProvider, BinaryMessenger messenger, String id, ExecutorService executor, Handler mainHandler) {
     this.configuration = configuration;
@@ -520,6 +523,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   @Override
   public void onTrack(RtpTransceiver transceiver) {
+    trackTransceiver = transceiver;
   }
 
   @Override
@@ -568,26 +572,17 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     params.putMap("track", mediaTrackToMap(receiver.track()));
     params.putMap("receiver", rtpReceiverToMap(receiver));
 
-    String receiverId = receiver.id();
-    executor.execute(() -> {
-      if (closed || peerConnection == null) {
-        return;
+    RtpTransceiver transceiver = trackTransceiver;
+    if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN
+        && transceiver != null && receiver.id().equals(transceiver.getReceiver().id())) {
+      String transceiverId = transceiver.getMid();
+      if (null == transceiverId) {
+        transceiverId = stateProvider.getNextStreamUUID();
+        this.transceivers.put(transceiverId,transceiver);
       }
-      if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN) {
-        List<RtpTransceiver> transceivers = peerConnection.getTransceivers();
-        for (RtpTransceiver transceiver : transceivers) {
-          if (transceiver.getReceiver() != null && receiverId.equals(transceiver.getReceiver().id())) {
-            String transceiverId = transceiver.getMid();
-            if (null == transceiverId) {
-              transceiverId = stateProvider.getNextStreamUUID();
-              this.transceivers.put(transceiverId,transceiver);
-            }
-            params.putMap("transceiver", transceiverToMap(transceiverId, transceiver));
-          }
-        }
-      }
-      sendEvent(params);
-    });
+      params.putMap("transceiver", transceiverToMap(transceiverId, transceiver));
+    }
+    sendEvent(params);
   }
 
   @Override

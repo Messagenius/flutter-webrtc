@@ -300,16 +300,13 @@ EncodableValue getConstrainInt(const EncodableMap& constraints,
   EncodableValue value;
   auto it = constraints.find(EncodableValue(key));
   if (it != constraints.end()) {
-    if (TypeIs<int>(it->second)) {
+    if (TypeIs<int>(it->second) || TypeIs<double>(it->second) ||
+        TypeIs<std::string>(it->second)) {
       return it->second;
     }
 
     if (TypeIs<EncodableMap>(it->second)) {
-      EncodableMap innerMap = GetValue<EncodableMap>(it->second);
-      auto it2 = innerMap.find(EncodableValue("ideal"));
-      if (it2 != innerMap.end() && TypeIs<int>(it2->second)) {
-        return it2->second;
-      }
+      return getConstrainInt(GetValue<EncodableMap>(it->second), "ideal");
     }
   }
 

@@ -776,9 +776,10 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   // apart. Store it even if not currently available: it will be applied once
   // the device (re)appears.
   self.preferredInputUID = deviceId;
-  [AudioUtils selectAudioInputWithUID:deviceId];
-  if (result)
-    result(nil);
+  [self runBlocking:^(FlutterResult done) {
+    [AudioUtils selectAudioInputWithUID:deviceId];
+    done(nil);
+  } result:result];
   return;
 #else
   if (result)
@@ -847,8 +848,10 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   self.speakerOn = speaker;
   self.speakerOnButPreferBluetooth = NO;
   self.speakerPreferenceSet = YES;
-  [AudioUtils setSpeakerphoneOn:speaker];
-  result(nil);
+  [self runBlocking:^(FlutterResult done) {
+    [AudioUtils setSpeakerphoneOn:speaker];
+    done(nil);
+  } result:result];
   return;
 #endif
   result([FlutterError errorWithCode:@"selectAudioOutputFailed"

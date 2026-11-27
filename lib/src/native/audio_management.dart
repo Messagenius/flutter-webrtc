@@ -33,6 +33,12 @@ class NativeAudioManagement {
     );
   }
 
+  /// iOS/Android only; a no-op elsewhere.
+  static Future<void> clearPreferredAudioInput() async {
+    if (kIsWeb || !WebRTC.platformIsMobile) return;
+    await WebRTC.invokeMethod('clearPreferredAudioInput');
+  }
+
   static Future<void> setSpeakerphoneOn(bool enable) async {
     await WebRTC.invokeMethod(
       'enableSpeakerphone',
