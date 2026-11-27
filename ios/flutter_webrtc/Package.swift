@@ -18,8 +18,8 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "WebRTC",
-            url: "https://github.com/webrtc-sdk/Specs/releases/download/150.7871.01/WebRTC.xcframework.zip",
-            checksum: "03815cdf2f6a0ed328c94d74cce8fd1b8d2b6e95e2b37eab66795012fcecfdfa"
+            url: "https://github.com/webrtc-sdk/Specs/releases/download/150.7871.09/WebRTC.xcframework.zip",
+            checksum: "c8645d0253ead3728646d9df76b733e4ace847ae91148484765aeeb40db52039"
         ),
         .target(
             name: "flutter_webrtc",

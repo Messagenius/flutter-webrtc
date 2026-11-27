@@ -39,7 +39,8 @@ Rules:
 - A renderer is removed from `renders` at once, and `dispose` (texture unregister) runs on the main thread after its
   queued track change.
 - The audio-engine callbacks (`willEnableEngine:`, `willStartEngine:`) stay synchronous on WebRTC's worker thread.
-- macOS keeps its audio-device branches of `getSources` / `selectAudioInput` / `selectAudioOutput` on the platform
-  thread.
+- `getSources` discovers cameras (and, on macOS, audio devices) on a background queue, as upstream 1.7.0 does. On iOS
+  it then reads the audio session on `blockingQueue` and replies on the main thread.
+- macOS keeps its audio-device branches of `selectAudioInput` / `selectAudioOutput` on the platform thread.
 
 Not moved yet: `streamDispose` / `trackDispose` still read `stream.videoTracks` / `audioTracks` on the platform thread.

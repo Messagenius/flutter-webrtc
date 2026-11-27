@@ -1,5 +1,6 @@
 // RTCVideoView rotates the texture by the renderer's rotation on iOS/macOS only.
 // No failure cases: the rotation comes from a native event and the widget has no error path.
+
 import 'dart:math';
 
 import 'package:flutter/services.dart';

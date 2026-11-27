@@ -60,6 +60,11 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   final Map<String, MediaStream> remoteStreams = new ConcurrentHashMap<>();
   private final RemoteTrackRegistry<MediaStreamTrack> remoteTracks =
       new RemoteTrackRegistry<>();
+  // Unified Plan: the track registered for each receiver id by onAddTrack, so
+  // onRemoveTrack (which gets another wrapper of the same receiver) removes
+  // that exact object.
+  private final Map<String, MediaStreamTrack> remoteTracksByReceiver =
+      new ConcurrentHashMap<>();
   final Map<String, RtpTransceiver> transceivers = new ConcurrentHashMap<>();
   private final StateProvider stateProvider;
   private final EventChannel eventChannel;
@@ -116,6 +121,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     peerConnection.close();
     remoteStreams.clear();
     remoteTracks.clear();
+    remoteTracksByReceiver.clear();
     // The data channels stay registered until dispose() so that their event
     // channel handlers can be released there. Closing the peer connection
     // already closes them.
@@ -531,7 +537,6 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     if (closed) {
       return;
     }
-    remoteTracks.put(receiver.track().id(), receiver.track());
     Log.d(TAG, "onAddTrack");
     // for plan-b
     for (MediaStream stream : mediaStreams) {
@@ -572,15 +577,32 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     params.putMap("track", mediaTrackToMap(receiver.track()));
     params.putMap("receiver", rtpReceiverToMap(receiver));
 
-    RtpTransceiver transceiver = trackTransceiver;
-    if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN
-        && transceiver != null && receiver.id().equals(transceiver.getReceiver().id())) {
-      String transceiverId = transceiver.getMid();
-      if (null == transceiverId) {
-        transceiverId = stateProvider.getNextStreamUUID();
-        this.transceivers.put(transceiverId,transceiver);
+    if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN) {
+      // Register the track object of this callback's receiver, as
+      // onAddStream does for Plan B. Without it a renderer resolves the
+      // track through peerConnection.getTransceivers(), whose next call (any
+      // getTransceivers/getReceivers from Dart) disposes the
+      // RtpTransceivers of the previous one, their receivers' tracks and,
+      // with them, every sink attached to those tracks: the renderer stops
+      // receiving frames while the track keeps decoding. The receiver of this
+      // callback is not part of those lists, so its track object stays valid.
+      MediaStreamTrack receiverTrack = receiver.track();
+      if (receiverTrack != null) {
+        String streamId = mediaStreams.length > 0 ? mediaStreams[0].getId() : "";
+        remoteTracks.put(receiverTrack.id(), receiverTrack);
+        remoteTracksByReceiver.put(receiver.id(), receiverTrack);
+        stateProvider.onRemoteTrackAdded(id, streamId, receiverTrack);
       }
-      params.putMap("transceiver", transceiverToMap(transceiverId, transceiver));
+
+      RtpTransceiver transceiver = trackTransceiver;
+      if (transceiver != null && receiver.id().equals(transceiver.getReceiver().id())) {
+        String transceiverId = transceiver.getMid();
+        if (null == transceiverId) {
+          transceiverId = stateProvider.getNextStreamUUID();
+          this.transceivers.put(transceiverId,transceiver);
+        }
+        params.putMap("transceiver", transceiverToMap(transceiverId, transceiver));
+      }
     }
     sendEvent(params);
   }
@@ -594,6 +616,10 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
     MediaStreamTrack track = rtpReceiver.track();
     String trackId = track.id();
+    MediaStreamTrack registered = remoteTracksByReceiver.remove(rtpReceiver.id());
+    if (registered != null) {
+      remoteTracks.remove(trackId, registered);
+    }
     ConstraintsMap trackInfo = new ConstraintsMap();
     trackInfo.putString("id", trackId);
     trackInfo.putString("label", track.kind());
@@ -1061,6 +1087,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     candidateParams.putInt("sdpMLineIndex", candidate.sdpMLineIndex);
     candidateParams.putString("sdpMid", candidate.sdpMid);
     candidateParams.putString("candidate", candidate.sdp);
+    candidateParams.putString("usernameFragment", candidate.usernameFragment);
     return candidateParams.toMap();
   }
 
