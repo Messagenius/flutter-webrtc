@@ -766,13 +766,7 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   } else if ([@"createLocalMediaStream" isEqualToString:call.method]) {
     [self createLocalMediaStream:result];
   } else if ([@"getSources" isEqualToString:call.method]) {
-#if TARGET_OS_IPHONE
-    [self runBlocking:^(FlutterResult done) {
-      [self getSources:done];
-    } result:result];
-#else
     [self getSources:result];
-#endif
   } else if ([@"selectAudioInput" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* deviceId = argsMap[@"deviceId"];

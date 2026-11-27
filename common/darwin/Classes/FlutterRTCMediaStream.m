@@ -721,8 +721,13 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
       }];
     }
 #endif
-    dispatch_async(dispatch_get_main_queue(), ^{
+    void (^reply)(void) = ^{
+      result(@{@"sources" : sources});
+    };
 #if TARGET_OS_IPHONE
+    // availableInputs and currentRoute wait on the audio server, so they run
+    // on blockingQueue, after the audio session calls queued before this one.
+    dispatch_async(self.blockingQueue, ^{
       RTCAudioSession* session = [RTCAudioSession sharedInstance];
       for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
         // NSLog(@"input portName: %@, type %@", port.portName,port.portType);
@@ -751,9 +756,11 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
           @"kind" : @"audiooutput",
         }];
       }
-#endif
-      result(@{@"sources" : sources});
+      dispatch_async(dispatch_get_main_queue(), reply);
     });
+#else
+    dispatch_async(dispatch_get_main_queue(), reply);
+#endif
   });
 }
 
