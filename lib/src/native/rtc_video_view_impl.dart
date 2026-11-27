@@ -60,7 +60,8 @@ class RTCVideoView extends StatelessWidget {
                     child: videoRenderer.renderVideo
                         ? RotatedBox(
                             // Only iOS/macOS textures arrive unrotated.
-                            quarterTurns: _rotatesTexture ? value.rotation ~/ 90 : 0,
+                            quarterTurns:
+                                _rotatesTexture ? value.rotation ~/ 90 : 0,
                             child: Texture(
                               textureId: videoRenderer.textureId!,
                               filterQuality: filterQuality,

@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webrtc_interface/webrtc_interface.dart';
 
@@ -8,8 +9,10 @@ import 'package:flutter_webrtc/src/native/utils.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('FlutterWebRTC.Method');
-  const eventChannel = MethodChannel('FlutterWebRTC/peerConnectionEventtest-peer');
-  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  const eventChannel =
+      MethodChannel('FlutterWebRTC/peerConnectionEventtest-peer');
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   late RTCPeerConnectionNative peerConnection;
   late List<MethodCall> calls;
   PlatformException? candidateError;
@@ -41,7 +44,9 @@ void main() {
     RTCIceCandidate('', null, null),
     RTCIceCandidate('', 'video', 1),
   ]) {
-    test('does not send end-of-candidates ${candidate.toMap()} to native WebRTC', () async {
+    test(
+        'does not send end-of-candidates ${candidate.toMap()} to native WebRTC',
+        () async {
       await peerConnection.addCandidate(candidate);
 
       expect(calls, isEmpty);
@@ -64,12 +69,18 @@ void main() {
     });
   });
 
-  for (final message in ['Invalid candidate', 'Peer connection is closed', 'Peer connection not found']) {
+  for (final message in [
+    'Invalid candidate',
+    'Peer connection is closed',
+    'Peer connection not found'
+  ]) {
     test('preserves native error: $message', () async {
-      candidateError = PlatformException(code: 'addCandidateFailed', message: message);
+      candidateError =
+          PlatformException(code: 'addCandidateFailed', message: message);
 
       await expectLater(
-        peerConnection.addCandidate(RTCIceCandidate('nonempty-candidate', 'video', 1)),
+        peerConnection
+            .addCandidate(RTCIceCandidate('nonempty-candidate', 'video', 1)),
         throwsA('Unable to RTCPeerConnection::addCandidate: $message'),
       );
       expect(calls.single.method, 'addCandidate');
